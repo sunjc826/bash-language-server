@@ -6,6 +6,9 @@ describe('ConfigSchema', () => {
     expect(ConfigSchema.parse({})).toMatchInlineSnapshot(`
       {
         "backgroundAnalysisMaxFiles": 500,
+        "constexprFunctionCacheTtl": 60000,
+        "constexprFunctionTimeout": 2000,
+        "constexprFunctionsEnabled": false,
         "enableFlowAnalysis": false,
         "enableSourceErrorDiagnostics": false,
         "explainshellEndpoint": "",
@@ -55,6 +58,9 @@ describe('ConfigSchema', () => {
     ).toMatchInlineSnapshot(`
       {
         "backgroundAnalysisMaxFiles": 1,
+        "constexprFunctionCacheTtl": 60000,
+        "constexprFunctionTimeout": 2000,
+        "constexprFunctionsEnabled": false,
         "enableFlowAnalysis": false,
         "enableSourceErrorDiagnostics": false,
         "explainshellEndpoint": "localhost:8080",
@@ -101,6 +107,9 @@ describe('getConfigFromEnvironmentVariables', () => {
     expect(config).toMatchInlineSnapshot(`
       {
         "backgroundAnalysisMaxFiles": 500,
+        "constexprFunctionCacheTtl": 60000,
+        "constexprFunctionTimeout": 2000,
+        "constexprFunctionsEnabled": false,
         "enableFlowAnalysis": false,
         "enableSourceErrorDiagnostics": false,
         "explainshellEndpoint": "",
@@ -136,6 +145,9 @@ describe('getConfigFromEnvironmentVariables', () => {
     expect(config).toMatchInlineSnapshot(`
       {
         "backgroundAnalysisMaxFiles": 500,
+        "constexprFunctionCacheTtl": 60000,
+        "constexprFunctionTimeout": 2000,
+        "constexprFunctionsEnabled": false,
         "enableFlowAnalysis": false,
         "enableSourceErrorDiagnostics": false,
         "explainshellEndpoint": "",
@@ -177,6 +189,9 @@ describe('getConfigFromEnvironmentVariables', () => {
     expect(config).toMatchInlineSnapshot(`
       {
         "backgroundAnalysisMaxFiles": 1,
+        "constexprFunctionCacheTtl": 60000,
+        "constexprFunctionTimeout": 2000,
+        "constexprFunctionsEnabled": false,
         "enableFlowAnalysis": false,
         "enableSourceErrorDiagnostics": false,
         "explainshellEndpoint": "localhost:8080",

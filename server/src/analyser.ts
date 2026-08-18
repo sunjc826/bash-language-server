@@ -10,6 +10,7 @@ import * as Parser from 'web-tree-sitter'
 
 import { flattenArray } from './util/array'
 import { parseBashIdeDirectives } from './util/bash-ide-directives'
+import { ConstexprEvaluator } from './util/constexpr-evaluator'
 import {
   FindDeclarationParams,
   findDeclarationUsingGlobalSemantics,
@@ -22,6 +23,7 @@ import {
 import {
   FlowAnalyzer,
   FlowAnalysisContext,
+  FlowAnalysisOptions,
   InlayHint,
 } from './util/flow-analysis'
 import { FlowBindings, tryGetConcreteValues, tryGetSingleValue } from './util/flow-value'
@@ -47,6 +49,8 @@ type AnalyzedDocument = {
   dimmedRanges?: LSP.Range[]
   /** Source commands with resolved paths that don't exist on disk (for error diagnostics). */
   sourceErrors?: Array<{ range: LSP.Range; path: string }>
+  /** Orphaned `# bash-ide constexpr` directive ranges (for error diagnostics). */
+  constexprErrors?: LSP.Range[]
 }
 
 /**
@@ -64,6 +68,13 @@ export default class Analyzer {
   private uriToFlowBindings: Map<string, FlowBindings> = new Map()
   /** Tracks dynamically-resolved sourced URIs discovered during flow analysis (per source file). */
   private uriToFlowSourcedUris: Map<string, Set<string>> = new Map()
+  /** Long-lived constexpr evaluator (and its cache) shared across analyses. */
+  private constexprEvaluator: ConstexprEvaluator | null = null
+  private constexprConfig: {
+    enabled: boolean
+    timeoutMs: number
+    cacheTtlMs: number
+  } | null = null
 
   public constructor({
     enableSourceErrorDiagnostics = false,
@@ -85,6 +96,33 @@ export default class Analyzer {
   /** Set the configuration for flow analysis. */
   public setConfig(config: Config): void {
     this.config = config
+  }
+
+  /**
+   * Configure opt-in constexpr function evaluation. The evaluator (and its
+   * cache) is long-lived; it is only recreated when the timeout or cache TTL
+   * changes.
+   */
+  public setConstexprOptions(options: {
+    enabled: boolean
+    timeoutMs: number
+    cacheTtlMs: number
+  }): void {
+    const previous = this.constexprConfig
+    this.constexprConfig = options
+
+    if (
+      options.enabled &&
+      (!this.constexprEvaluator ||
+        !previous ||
+        previous.timeoutMs !== options.timeoutMs ||
+        previous.cacheTtlMs !== options.cacheTtlMs)
+    ) {
+      this.constexprEvaluator = new ConstexprEvaluator({
+        timeoutMs: options.timeoutMs,
+        cacheTtlMs: options.cacheTtlMs,
+      })
+    }
   }
 
   /**
@@ -352,6 +390,7 @@ export default class Analyzer {
             inlayHints: [],
             dimmedRanges: [],
             sourceErrors: [],
+            constexprErrors: [],
           }
 
           // Run flow analysis on the sourced file recursively
@@ -366,20 +405,44 @@ export default class Analyzer {
       inlayHints: [],
       dimmedRanges: [],
       sourceErrors: [],
+      constexprErrors: [],
       topLevelUri: uri,
     }
 
     // Run the flow analysis
-    const flowBindings = FlowAnalyzer.analyzeFile(ctx)
+    const flowBindings = FlowAnalyzer.analyzeFile(ctx, this.buildConstexprFlowOptions())
 
     // Store results
     analyzedDoc.flowBindings = flowBindings
     analyzedDoc.inlayHints = ctx.inlayHints
     analyzedDoc.dimmedRanges = ctx.dimmedRanges
     analyzedDoc.sourceErrors = ctx.sourceErrors
+    analyzedDoc.constexprErrors = ctx.constexprErrors
 
     // Also cache
     this.uriToFlowBindings.set(uri, flowBindings)
+  }
+
+  /**
+   * Build the per-analysis constexpr options (registry and budget) when
+   * constexpr evaluation is enabled. The registry and budget are fresh per
+   * top-level analysis pass; the evaluator itself is long-lived.
+   */
+  private buildConstexprFlowOptions(): FlowAnalysisOptions | undefined {
+    if (!this.constexprEvaluator || !this.constexprConfig?.enabled) {
+      return undefined
+    }
+
+    return {
+      constexpr: {
+        evaluator: this.constexprEvaluator,
+        registry: new Map(),
+        budget: {
+          spawnsRemaining: 100,
+          deadline: Date.now() + 10_000,
+        },
+      },
+    }
   }
 
   /**
@@ -417,6 +480,13 @@ export default class Analyzer {
    */
   public getSourceErrors(uri: string): Array<{ range: LSP.Range; path: string }> {
     return this.uriToAnalyzedDocument[uri]?.sourceErrors || []
+  }
+
+  /**
+   * Get orphaned `# bash-ide constexpr` directive ranges.
+   */
+  public getConstexprErrors(uri: string): LSP.Range[] {
+    return this.uriToAnalyzedDocument[uri]?.constexprErrors || []
   }
 
   /**

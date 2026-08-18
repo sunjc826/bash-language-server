@@ -322,6 +322,12 @@ export default class BashServer {
 
           this.analyzer.setConfig(this.config)
 
+          this.analyzer.setConstexprOptions({
+            enabled: this.config.constexprFunctionsEnabled,
+            timeoutMs: this.config.constexprFunctionTimeout,
+            cacheTtlMs: this.config.constexprFunctionCacheTtl,
+          })
+
           if (!isDefaultConfig) {
             // We skip setting the log level as the default configuration should
             // not override the environment defined log level.
@@ -367,6 +373,21 @@ export default class BashServer {
           LSP.Diagnostic.create(
             range,
             `Sourced file not found: ${sourcePath}`,
+            LSP.DiagnosticSeverity.Error,
+            undefined,
+            'bash-language-server (flow analysis)',
+          ),
+        )
+      }
+
+      // Add error diagnostics for `# bash-ide constexpr` directives that are
+      // not directly above a function definition.
+      const constexprErrors = this.analyzer.getConstexprErrors(uri)
+      for (const range of constexprErrors) {
+        diagnostics.push(
+          LSP.Diagnostic.create(
+            range,
+            '# bash-ide constexpr must be placed in the comment block directly above a function definition',
             LSP.DiagnosticSeverity.Error,
             undefined,
             'bash-language-server (flow analysis)',
@@ -1181,6 +1202,10 @@ export default class BashServer {
         { label: 'env-init-begin', detail: 'Start a multi-line env-init block' },
         { label: 'env-init-end', detail: 'End a multi-line env-init block' },
         { label: 'source-pushd', detail: 'Source files use pushd working directory semantics' },
+        {
+          label: 'constexpr',
+          detail: 'Mark a function as safe to evaluate at analysis time',
+        },
       ]
 
       const filtered = afterBashIde

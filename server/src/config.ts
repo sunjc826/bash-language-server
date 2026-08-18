@@ -11,6 +11,17 @@ export const ConfigSchema = z.object({
   // and untaken constexpr branches are dimmed.
   enableFlowAnalysis: z.boolean().default(false),
 
+  // Enable opt-in constexpr function evaluation. Functions marked with
+  // `# bash-ide constexpr` may be executed in a sandboxed bash process at
+  // analysis time to resolve command substitutions.
+  constexprFunctionsEnabled: z.boolean().default(false),
+
+  // Per-call timeout (ms) for constexpr function evaluation.
+  constexprFunctionTimeout: z.number().int().min(1).default(2000),
+
+  // How long (ms) successful constexpr results are cached.
+  constexprFunctionCacheTtl: z.number().int().min(0).default(60000),
+
   // Enable diagnostics for source errors. Ignored if includeAllWorkspaceSymbols is true.
   enableSourceErrorDiagnostics: z.boolean().default(false),
 
@@ -137,6 +148,9 @@ export function getConfigFromEnvironmentVariables(): {
       spaceRedirects: toBoolean(process.env.SHFMT_SPACE_REDIRECTS),
     },
     enableFlowAnalysis: toBoolean(process.env.ENABLE_FLOW_ANALYSIS),
+    constexprFunctionsEnabled: toBoolean(process.env.CONSTEXPR_FUNCTIONS_ENABLED),
+    constexprFunctionTimeout: toNumber(process.env.CONSTEXPR_FUNCTION_TIMEOUT),
+    constexprFunctionCacheTtl: toNumber(process.env.CONSTEXPR_FUNCTION_CACHE_TTL),
     seedVariables: {},
     pathEnvInit: [],
   }

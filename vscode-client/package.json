@@ -42,6 +42,23 @@
           "default": false,
           "description": "Enable flow-sensitive analysis for resolving variable values, constant branch evaluation, and dynamic source resolution. When enabled, inlay hints show resolved variable values and untaken constexpr branches are dimmed."
         },
+        "bashIde.constexprFunctionsEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable opt-in constexpr function evaluation. Functions marked with `# bash-ide constexpr` may be executed in a sandboxed bash process at analysis time to resolve command substitutions."
+        },
+        "bashIde.constexprFunctionTimeout": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 1,
+          "description": "Per-call timeout in milliseconds for constexpr function evaluation."
+        },
+        "bashIde.constexprFunctionCacheTtl": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 0,
+          "description": "How long (in milliseconds) successful constexpr results are cached."
+        },
         "bashIde.enableSourceErrorDiagnostics": {
           "type": "boolean",
           "default": false,

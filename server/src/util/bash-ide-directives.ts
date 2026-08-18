@@ -10,12 +10,21 @@
  *   # bash-ide source-pushd
  *   # bash-ide source=<path>
  *   # bash-ide transitive-source=<path>
+ *   # bash-ide constexpr
  */
 
 /**
  * Types of bash-ide directives.
  */
-export type BashIdeDirectiveType = 'cwd' | 'env-init' | 'env-init-begin' | 'env-init-end' | 'source-pushd' | 'source' | 'transitive-source'
+export type BashIdeDirectiveType =
+  | 'cwd'
+  | 'env-init'
+  | 'env-init-begin'
+  | 'env-init-end'
+  | 'source-pushd'
+  | 'source'
+  | 'transitive-source'
+  | 'constexpr'
 
 /**
  * A parsed bash-ide directive.
@@ -103,6 +112,8 @@ export function parseBashIdeDirectives(fileContent: string): {
     } else if (content.startsWith('transitive-source=')) {
       const value = content.slice(18).trim()
       directives.push({ type: 'transitive-source', value, line: i })
+    } else if (content === 'constexpr') {
+      directives.push({ type: 'constexpr', line: i })
     }
   }
 
