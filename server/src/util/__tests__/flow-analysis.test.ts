@@ -659,6 +659,31 @@ describe('FlowAnalyzer', () => {
       expect(getVar(bindings, 'x')).toBe('0')
     })
 
+    it('applies expansion operators in cd, pushd and source paths', () => {
+      const sourced: string[] = []
+      const bindings = analyzeSource(
+        [
+          'lib=/opt/app/lib/x.sh',
+          'pushd "${lib%/*}"',
+          'here=$PWD',
+          'dir=/srv/data',
+          'cd $dir',
+          'there=$PWD',
+          'source "${lib%/*}/y.sh"',
+        ].join('\n'),
+        {
+          resolveSource: (sourcePath) => sourcePath,
+          analyzeSourcedFile: (uri) => {
+            sourced.push(uri)
+            return new Map()
+          },
+        },
+      )
+      expect(getVar(bindings, 'here')).toBe('/opt/app/lib')
+      expect(getVar(bindings, 'there')).toBe('/srv/data')
+      expect(sourced).toEqual(['file:///opt/app/lib/y.sh'])
+    })
+
     it('does not change the working directory when defining a function', () => {
       const bindings = analyzeSource('f() { cd /tmp; }')
       expect(getVar(bindings, 'PWD')).toBe('/project')

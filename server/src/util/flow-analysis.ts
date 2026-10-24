@@ -1217,13 +1217,17 @@ export class FlowAnalyzer {
       }
     }
 
+    if (argNode.type === 'expansion' || argNode.type === 'simple_expansion') {
+      const val = FlowAnalyzer.resolvePathExpansion(argNode, bindings, ctx)
+      if (val) {
+        return FlowAnalyzer.resolveAbsolutePath(val, currentPwd)
+      }
+    }
+
     if (argNode.type === 'string' && argNode.namedChildren.length === 1) {
       const child = argNode.namedChildren[0]
       if (TreeSitterUtil.isExpansion(child)) {
-        const varName = child.text.startsWith('$')
-          ? child.text.slice(1).replace(/[{}]/g, '')
-          : child.text
-        const val = resolveFlowVariable(varName, bindings)
+        const val = FlowAnalyzer.resolvePathExpansion(child, bindings, ctx)
         if (val) {
           return FlowAnalyzer.resolveAbsolutePath(val, currentPwd)
         }
@@ -1232,7 +1236,7 @@ export class FlowAnalyzer {
 
     // Handle multi-child strings with expansions (e.g. "$HOME/subdir")
     if (argNode.type === 'string' && argNode.namedChildren.length > 1) {
-      const resolved = FlowAnalyzer.resolveStringWithBindings(argNode, bindings)
+      const resolved = FlowAnalyzer.resolveStringWithBindings(argNode, bindings, ctx)
       if (resolved) {
         return FlowAnalyzer.resolveAbsolutePath(resolved, currentPwd)
       }
@@ -1289,20 +1293,17 @@ export class FlowAnalyzer {
         }
       }
       if (child.type === 'expansion' || child.type === 'simple_expansion') {
-        const varNameNode = child.descendantsOfType('variable_name')[0]
-        if (varNameNode) {
-          const val = resolveFlowVariable(varNameNode.text, bindings)
-          if (val !== null) {
-            parts.push(val)
-            continue
-          }
+        const val = FlowAnalyzer.resolvePathExpansion(child, bindings, ctx)
+        if (val !== null) {
+          parts.push(val)
+          continue
         }
       }
       // Handle string children that contain expansions (e.g. "$HOME" within
       // a concatenation like "$HOME"/script.sh). Extract the expansion and
       // resolve the variable.
       if (child.type === 'string') {
-        const resolved = FlowAnalyzer.resolveStringWithBindings(child, bindings)
+        const resolved = FlowAnalyzer.resolveStringWithBindings(child, bindings, ctx)
         if (resolved !== null) {
           parts.push(resolved)
           continue
@@ -1318,6 +1319,28 @@ export class FlowAnalyzer {
   }
 
   /**
+   * Resolve an expansion in a path argument to a single string. The flow
+   * evaluator applies operators such as ${VAR%/*}; a plain $VAR the analysis
+   * has no value for falls back to the environment.
+   */
+  private static resolvePathExpansion(
+    expansion: SyntaxNode,
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+  ): string | null {
+    const quietCtx: FlowAnalysisContext = {
+      ...ctx,
+      trackInlayHints: false,
+      referenceValues: undefined,
+    }
+    const result = FlowAnalyzer.evaluateExpression(expansion, bindings, quietCtx)
+    const value = result.success && result.value ? tryGetSingleValue(result.value) : null
+    if (value !== null) return value
+    const name = FlowAnalyzer.plainVariableReference(expansion)
+    return name ? resolveFlowVariable(name, bindings) : null
+  }
+
+  /**
    * Try to resolve a string node (e.g. "$HOME") using variable bindings.
    * Handles strings that contain a single expansion or mixed content
    * like "prefix${VAR}suffix".
@@ -1325,6 +1348,7 @@ export class FlowAnalyzer {
   private static resolveStringWithBindings(
     node: SyntaxNode,
     bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
   ): string | null {
     if (node.type !== 'string') return null
 
@@ -1335,13 +1359,10 @@ export class FlowAnalyzer {
         continue
       }
       if (child.type === 'expansion' || child.type === 'simple_expansion') {
-        const varNameNode = child.descendantsOfType('variable_name')[0]
-        if (varNameNode) {
-          const val = resolveFlowVariable(varNameNode.text, bindings)
-          if (val !== null) {
-            parts.push(val)
-            continue
-          }
+        const val = FlowAnalyzer.resolvePathExpansion(child, bindings, ctx)
+        if (val !== null) {
+          parts.push(val)
+          continue
         }
       }
       // Can't resolve this child
