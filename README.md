@@ -249,6 +249,8 @@ diagnostics).
 - **Constant branch evaluation**: `if [[ $KNOWN -eq 1 ]]`, `case $VERSION in ...`, and `while`/`until` conditions are evaluated when values are known
 - **Live PWD tracking**: `cd`, `pushd`, and `popd` commands update the working directory for relative path resolution
 - **Dynamic source resolution**: `source` and `.` commands resolve paths using flow-resolved variables
+- **Narrowing**: inside `if "$flag"`, `[[ -n $x ]] && ...` or `case $x in a)` branches, and after them, a variable with a few known values holds only the values that reach that point
+- **Path termination**: paths that reach `exit` or `return` (including `[[ -n $x ]] || exit`), and failing `[[ ... ]]`, `test` or `false` statements under `set -e`, do not contribute values to the code after them
 
 ### `# bash-ide` Directives
 

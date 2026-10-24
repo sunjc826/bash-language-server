@@ -24,8 +24,11 @@ import {
   flowValuesEqual,
   FlowValue,
   formatFlowValue,
+  INTERNAL_BINDING_PREFIX,
   join,
   joinBindings,
+  markUnreachable,
+  UNREACHABLE_BINDING,
   resolveFlowVariable,
   tryGetArrayElements,
   tryGetSingleValue,
@@ -169,6 +172,24 @@ function copyState(state: AnalysisState): AnalysisState {
 /** Iterations of a loop body before still-changing values are widened. */
 const MAX_LOOP_ITERATIONS = 4
 
+/** Most known values of one variable that conditions and case items narrow. */
+const MAX_REFINED_VALUES = 32
+
+// Nodes whose named children are statements run one after another.
+const STATEMENT_LIST_TYPES = new Set([
+  'program',
+  'compound_statement',
+  'do_group',
+  'if_statement',
+  'elif_clause',
+  'else_clause',
+  'case_item',
+  'subshell',
+])
+
+/** Internal binding set to `on` while `set -e` is in effect. */
+const ERREXIT_BINDING = `${INTERNAL_BINDING_PREFIX}errexit`
+
 export class FlowAnalyzer {
   /**
    * Analyze a single file and return the final flow bindings.
@@ -248,7 +269,55 @@ export class FlowAnalyzer {
     }
     bindings.set('DIRSTACK', concreteArray(state.dirstack, 'command-output'))
 
+    // Path state ends with the file; shell options persist.
+    bindings.delete(UNREACHABLE_BINDING)
+
     return bindings
+  }
+
+  /**
+   * Whether statement ends the path when it fails: it runs unconditionally
+   * in a statement list (not in a condition, && / || list, pipeline or
+   * command substitution) while `set -e` is in effect.
+   */
+  private static failureEndsPath(statement: SyntaxNode, bindings: FlowBindings): boolean {
+    return (
+      tryGetSingleValue(bindings.get(ERREXIT_BINDING) ?? unknown()) === 'on' &&
+      FlowAnalyzer.isUnconditionalStatement(statement)
+    )
+  }
+
+  /** Whether statement runs whenever the statement list containing it runs. */
+  private static isUnconditionalStatement(statement: SyntaxNode): boolean {
+    return FlowAnalyzer.isInShell(statement, ['redirected_statement'])
+  }
+
+  /**
+   * Whether node runs in the current shell (not a subshell, pipeline or
+   * substitution) once reached, climbing only through the given wrappers to
+   * its statement list.
+   */
+  private static isInShell(node: SyntaxNode, wrappers: string[]): boolean {
+    let current = node
+    while (current.parent && wrappers.includes(current.parent.type)) {
+      current = current.parent
+    }
+    const parentType = current.parent?.type
+    return parentType !== undefined && STATEMENT_LIST_TYPES.has(parentType)
+  }
+
+  /**
+   * Continue only with the values for which condition is true; mark the path
+   * unreachable when it cannot be.
+   */
+  private static assertCondition(
+    condition: SyntaxNode,
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+  ): void {
+    if (!FlowAnalyzer.refineByCondition(condition, bindings, ctx, true)) {
+      markUnreachable(bindings)
+    }
   }
 
   /**
@@ -331,6 +400,19 @@ export class FlowAnalyzer {
       case 'expansion':
         // Generate reference inlay hints for variable references
         FlowAnalyzer.evaluateExpansion(node, bindings, ctx)
+        break
+
+      case 'list':
+        FlowAnalyzer.analyzeList(node, bindings, ctx, state)
+        break
+
+      case 'test_command':
+        for (const child of node.namedChildren) {
+          FlowAnalyzer.analyzeNode(child, bindings, ctx, state)
+        }
+        if (FlowAnalyzer.failureEndsPath(node, bindings)) {
+          FlowAnalyzer.assertCondition(node, bindings, ctx)
+        }
         break
 
       default:
@@ -772,6 +854,58 @@ export class FlowAnalyzer {
           }
         }
         break
+      }
+    }
+
+    FlowAnalyzer.applyCommandEffects(node, cmdName, bindings, ctx)
+  }
+
+  /**
+   * Apply a command's effect on the path: `set -e`, ending it with exit
+   * or return, and failing under `set -e`.
+   */
+  private static applyCommandEffects(
+    node: SyntaxNode,
+    cmdName: string,
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+  ): void {
+    const args = node
+      .childrenForFieldName('argument')
+      .filter((c): c is SyntaxNode => c !== null)
+    if (cmdName === 'set') FlowAnalyzer.applySetOptions(args, bindings)
+
+    // exit and return end whichever path reaches them; the && / || paths
+    // that reach a command in a list are analyzed separately
+    if (cmdName === 'exit' || cmdName === 'return') {
+      if (
+        FlowAnalyzer.isInShell(node, ['redirected_statement', 'list', 'negated_command'])
+      ) {
+        markUnreachable(bindings)
+      }
+    } else if (FlowAnalyzer.failureEndsPath(node, bindings)) {
+      if (cmdName === 'false') {
+        markUnreachable(bindings)
+      } else if (cmdName === 'test' || cmdName === '[') {
+        FlowAnalyzer.assertCondition(node, bindings, ctx)
+      }
+    }
+  }
+
+  /** Track `set -e` / `set -o errexit` and their `+` forms. */
+  private static applySetOptions(args: SyntaxNode[], bindings: FlowBindings): void {
+    const words = args.map((arg) => TreeSitterUtil.resolveStaticString(arg))
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i]
+      if (word === null || word === '-' || word === '--') break
+      const enable = word.startsWith('-')
+      if ((word === '-o' || word === '+o') && words[i + 1] !== undefined) {
+        if (words[i + 1] === 'errexit') {
+          bindings.set(ERREXIT_BINDING, concrete(enable ? 'on' : 'off'))
+        }
+        i++
+      } else if (/^[-+][A-Za-z]+$/.test(word) && word.includes('e')) {
+        bindings.set(ERREXIT_BINDING, concrete(enable ? 'on' : 'off'))
       }
     }
   }
@@ -1336,9 +1470,10 @@ export class FlowAnalyzer {
     ]
     const elseClause = node.namedChildren.find((c) => c.type === 'else_clause')
 
-    // Every branch starts from the state before the if statement; the state
-    // after it joins the outcomes of the branches that can be taken.
-    const before = new Map(bindings)
+    // Each condition is tested in the state where every earlier condition was
+    // false. A branch starts from that state narrowed to its condition being
+    // true; the state after the if statement joins the branches taken.
+    const untested = new Map(bindings)
     const outcomes: FlowBindings[] = []
     let branchTaken = false
 
@@ -1347,10 +1482,14 @@ export class FlowAnalyzer {
       const body = FlowAnalyzer.bodyAfterThen(clause)
       const condition = FlowAnalyzer.findConditionNode(clause)
       const evalResult: EvalResult = condition
-        ? FlowAnalyzer.evaluateCondition(condition, before, ctx)
+        ? FlowAnalyzer.evaluateCondition(condition, untested, ctx)
         : { success: false }
 
-      if (evalResult.success && evalResult.isConstFalsy) {
+      const branch = new Map(untested)
+      const canRun =
+        !(evalResult.success && evalResult.isConstFalsy) &&
+        (!condition || FlowAnalyzer.refineByCondition(condition, branch, ctx, true))
+      if (!canRun) {
         if (ctx.trackInlayHints && body.length > 0) {
           ctx.dimmedRanges.push(
             LSP.Range.create(
@@ -1362,10 +1501,9 @@ export class FlowAnalyzer {
         continue
       }
 
-      const branch = new Map(before)
       const discriminant =
         evalResult.success && condition
-          ? FlowAnalyzer.extractDiscriminant(condition, before, ctx)
+          ? FlowAnalyzer.extractDiscriminant(condition, untested, ctx)
           : null
       if (discriminant) {
         FlowAnalyzer.applyDiscriminant(branch, discriminant, 'positive')
@@ -1375,7 +1513,10 @@ export class FlowAnalyzer {
       }
       outcomes.push(branch)
 
-      if (evalResult.success && evalResult.isConstTruthy) {
+      const canFallThrough =
+        !(evalResult.success && evalResult.isConstTruthy) &&
+        (!condition || FlowAnalyzer.refineByCondition(condition, untested, ctx, false))
+      if (!canFallThrough) {
         branchTaken = true
         if (ctx.trackInlayHints) {
           const untaken = conditionalClauses.slice(i + 1)
@@ -1389,17 +1530,98 @@ export class FlowAnalyzer {
 
     if (!branchTaken) {
       if (elseClause) {
-        const branch = new Map(before)
         for (const child of elseClause.namedChildren) {
-          FlowAnalyzer.analyzeNode(child, branch, ctx, state)
+          FlowAnalyzer.analyzeNode(child, untested, ctx, state)
         }
-        outcomes.push(branch)
-      } else {
-        outcomes.push(before)
       }
+      outcomes.push(untested)
     }
 
     FlowAnalyzer.replaceBindings(bindings, joinBindings(outcomes))
+  }
+
+  /**
+   * Analyze `left && right` or `left || right`: right runs only when left
+   * succeeds (&&) or fails (||), so the state after joins the path that runs
+   * it with the path that skips it.
+   */
+  private static analyzeList(
+    node: SyntaxNode,
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+    state: AnalysisState,
+  ): void {
+    const operator = node.children.find((c) => c.type === '&&' || c.type === '||')
+    const [left, right] = node.namedChildren.filter((c) => c.type !== 'comment')
+    if (!operator || !left || !right) {
+      for (const child of node.namedChildren) {
+        FlowAnalyzer.analyzeNode(child, bindings, ctx, state)
+      }
+      return
+    }
+
+    FlowAnalyzer.analyzeNode(left, bindings, ctx, state)
+    const runsRight = operator.type === '&&'
+    const rightPath = new Map(bindings)
+    const skipPath = new Map(bindings)
+    const outcomes: FlowBindings[] = []
+    if (FlowAnalyzer.refineByCondition(left, rightPath, ctx, runsRight)) {
+      FlowAnalyzer.analyzeNode(right, rightPath, ctx, state)
+      outcomes.push(rightPath)
+    }
+    if (FlowAnalyzer.refineByCondition(left, skipPath, ctx, !runsRight)) {
+      outcomes.push(skipPath)
+    }
+    if (outcomes.length > 0) {
+      FlowAnalyzer.replaceBindings(bindings, joinBindings(outcomes))
+    }
+  }
+
+  /**
+   * Narrow bindings to the values for which condition can have outcome.
+   * Each variable the condition references that holds a small set of known
+   * values is tried value by value, with the other variables as they are.
+   * Returns false when the condition cannot have that outcome.
+   */
+  private static refineByCondition(
+    condition: SyntaxNode,
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+    outcome: boolean,
+  ): boolean {
+    const trialCtx: FlowAnalysisContext = {
+      ...ctx,
+      trackInlayHints: false,
+      referenceValues: undefined,
+    }
+    const contradicts = (trial: FlowBindings): boolean => {
+      const result = FlowAnalyzer.evaluateCondition(condition, trial, trialCtx)
+      return !!result.success && !!(outcome ? result.isConstFalsy : result.isConstTruthy)
+    }
+    if (contradicts(new Map(bindings))) return false
+
+    const names = new Set(condition.descendantsOfType('variable_name').map((n) => n.text))
+    for (const name of names) {
+      const value = bindings.get(name)
+      if (
+        value?.kind !== 'concrete' ||
+        value.values.length < 2 ||
+        value.values.length > MAX_REFINED_VALUES ||
+        value.values.some((v) => v.elements)
+      ) {
+        continue
+      }
+      const kept = value.values.filter((v) => {
+        const trial = new Map(bindings)
+        trial.set(name, { kind: 'concrete', values: [v] })
+        return !contradicts(trial)
+      })
+      if (kept.length === 0) return false
+      if (kept.length < value.values.length) {
+        bindings.set(name, { kind: 'concrete', values: kept })
+      }
+    }
+    return true
   }
 
   /** The body of an if or elif clause: the statements after its `then`. */
@@ -1464,6 +1686,45 @@ export class FlowAnalyzer {
       return
     }
 
+    // A variable with a small set of known values: each item runs with the
+    // values it is the first to match; the remaining values match no item.
+    const subjectName = FlowAnalyzer.plainVariableReference(caseWord)
+    const subject = subjectName ? bindings.get(subjectName) : undefined
+    if (
+      subjectName &&
+      subject?.kind === 'concrete' &&
+      subject.values.length <= MAX_REFINED_VALUES &&
+      !subject.values.some((v) => v.elements)
+    ) {
+      const outcomes: FlowBindings[] = []
+      let unmatched = subject.values
+      for (const { item, patterns, body } of items) {
+        const matched = unmatched.filter((v) =>
+          patterns.some((p) => FlowAnalyzer.checkCasePattern(p, v.text)),
+        )
+        if (matched.length === 0) {
+          if (ctx.trackInlayHints && body.length > 0) {
+            ctx.dimmedRanges.push(TreeSitterUtil.range(item))
+          }
+          continue
+        }
+        unmatched = unmatched.filter((v) => !matched.includes(v))
+        const branch = new Map(bindings)
+        branch.set(subjectName, { kind: 'concrete', values: matched })
+        for (const bodyNode of body) {
+          FlowAnalyzer.analyzeNode(bodyNode, branch, ctx, state)
+        }
+        outcomes.push(branch)
+      }
+      if (unmatched.length > 0) {
+        const noMatch = new Map(bindings)
+        noMatch.set(subjectName, { kind: 'concrete', values: unmatched })
+        outcomes.push(noMatch)
+      }
+      FlowAnalyzer.replaceBindings(bindings, joinBindings(outcomes))
+      return
+    }
+
     // Unknown value: any item may run, each from the state before the case.
     // Without a catch-all pattern, no item may run at all.
     const before = new Map(bindings)
@@ -1480,6 +1741,22 @@ export class FlowAnalyzer {
     if (!hasCatchAll) outcomes.push(before)
 
     FlowAnalyzer.replaceBindings(bindings, joinBindings(outcomes))
+  }
+
+  /**
+   * The variable a word expands to unchanged: `$v`, `${v}` or `"$v"`.
+   */
+  private static plainVariableReference(word: SyntaxNode): string | null {
+    if (word.type === 'string') {
+      const [child, ...rest] = word.namedChildren
+      return child && rest.length === 0
+        ? FlowAnalyzer.plainVariableReference(child)
+        : null
+    }
+    if (word.type !== 'simple_expansion' && word.type !== 'expansion') return null
+    if (word.childrenForFieldName('operator').length > 0) return null
+    const [nameNode, ...rest] = word.namedChildren
+    return nameNode?.type === 'variable_name' && rest.length === 0 ? nameNode.text : null
   }
 
   /**

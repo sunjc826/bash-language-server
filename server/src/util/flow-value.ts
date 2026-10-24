@@ -163,10 +163,36 @@ export function flowValuesEqual(a?: FlowValue, b?: FlowValue): boolean {
 }
 
 /**
- * Join the bindings of several control-flow paths that meet. A variable bound
- * on only some paths keeps the values from those paths.
+ * Analysis-internal binding names start with this prefix, which no shell
+ * variable name can.
  */
-export function joinBindings(paths: FlowBindings[]): FlowBindings {
+export const INTERNAL_BINDING_PREFIX = '#'
+
+/**
+ * Internal binding present on a path that cannot continue, such as one that
+ * ran `exit`, `return`, or a failing command under `set -e`.
+ */
+export const UNREACHABLE_BINDING = `${INTERNAL_BINDING_PREFIX}unreachable`
+
+/** Whether bindings describe a path that cannot continue. */
+export function isUnreachable(bindings: FlowBindings): boolean {
+  return bindings.has(UNREACHABLE_BINDING)
+}
+
+/** Mark bindings as describing a path that cannot continue. */
+export function markUnreachable(bindings: FlowBindings): void {
+  bindings.set(UNREACHABLE_BINDING, bottom())
+}
+
+/**
+ * Join the bindings of several control-flow paths that meet. A variable bound
+ * on only some paths keeps the values from those paths. Paths that cannot
+ * continue are left out; when none can, the result cannot continue either.
+ */
+export function joinBindings(allPaths: FlowBindings[]): FlowBindings {
+  const paths = allPaths.filter((bindings) => !isUnreachable(bindings))
+  if (paths.length === 0) return new Map(allPaths[0])
+
   const result: FlowBindings = new Map()
   for (const bindings of paths) {
     for (const [name, value] of bindings) {

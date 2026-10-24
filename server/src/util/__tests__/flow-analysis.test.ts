@@ -511,18 +511,29 @@ describe('FlowAnalyzer', () => {
 
   // ─── control-flow joins ────────────────────────────────────────
 
+  function analyzeSource(
+    content: string,
+    ctxOverrides: Partial<FlowAnalysisContext> = {},
+  ): FlowBindings {
+    return analyzeSourceWithContext(content, ctxOverrides).bindings
+  }
+
+  function analyzeSourceWithContext(
+    content: string,
+    ctxOverrides: Partial<FlowAnalysisContext> = {},
+  ): { bindings: FlowBindings; ctx: FlowAnalysisContext } {
+    const uri = 'file:///project/script.sh'
+    const tree = parser.parse(content)!
+    const ctx = makeContext(uri, content, tree, ctxOverrides)
+    return { bindings: FlowAnalyzer.analyzeFile(ctx), ctx }
+  }
+
+  function getValues(bindings: FlowBindings, name: string): string[] {
+    const fv = bindings.get(name)
+    return fv ? tryGetConcreteValues(fv).sort() : []
+  }
+
   describe('control-flow joins', () => {
-    function analyzeSource(content: string): FlowBindings {
-      const uri = 'file:///project/script.sh'
-      const tree = parser.parse(content)!
-      return FlowAnalyzer.analyzeFile(makeContext(uri, content, tree))
-    }
-
-    function getValues(bindings: FlowBindings, name: string): string[] {
-      const fv = bindings.get(name)
-      return fv ? tryGetConcreteValues(fv).sort() : []
-    }
-
     it('resolves an assignment without a value to the empty string', () => {
       const bindings = analyzeSource(
         ['e=', 'declare d=', 'a=(x)', 'a[1]=', 's=abc', 's+='].join('\n'),
@@ -651,6 +662,95 @@ describe('FlowAnalyzer', () => {
     it('does not change the working directory when defining a function', () => {
       const bindings = analyzeSource('f() { cd /tmp; }')
       expect(getVar(bindings, 'PWD')).toBe('/project')
+    })
+  })
+
+  // ─── path termination and narrowing ───────────────────────────
+
+  describe('path termination and narrowing', () => {
+    it('drops branches that exit', () => {
+      const bindings = analyzeSource('x=0\nif [[ $1 ]]; then x=1; exit 1; fi')
+      expect(getVar(bindings, 'x')).toBe('0')
+    })
+
+    it('keeps paths whose exit is conditional or in a subshell', () => {
+      const bindings = analyzeSource(
+        [
+          'x=0',
+          '[[ $1 ]] && exit',
+          'x=1',
+          'y=0',
+          '(exit 1)',
+          'y=2',
+          'f() { return; }',
+        ].join('\n'),
+      )
+      expect(getVar(bindings, 'x')).toBe('1')
+      expect(getVar(bindings, 'y')).toBe('2')
+    })
+
+    it('runs the right side of && and || only on one outcome of the left', () => {
+      const bindings = analyzeSource(
+        [
+          'x=0',
+          '[[ $1 ]] && x=1',
+          'err=',
+          'cmd || err=failed',
+          'v=',
+          'if [[ $1 ]]; then v=a; fi',
+          '[[ -n "$v" ]] || exit 1',
+        ].join('\n'),
+      )
+      expect(getValues(bindings, 'x')).toEqual(['0', '1'])
+      expect(getValues(bindings, 'err')).toEqual(['', 'failed'])
+      expect(getVar(bindings, 'v')).toBe('a')
+    })
+
+    it('narrows a variable to the values that pass a condition', () => {
+      const bindings = analyzeSource(
+        [
+          'if [[ $1 ]]; then f=true; else f=false; fi',
+          'if "$f"; then a=$f; else b=$f; fi',
+          'if "$f"; then exit 0; fi',
+        ].join('\n'),
+      )
+      expect(getVar(bindings, 'a')).toBe('true')
+      expect(getVar(bindings, 'b')).toBe('false')
+      expect(getVar(bindings, 'f')).toBe('false')
+    })
+
+    it('treats failing tests and false under set -e as assertions', () => {
+      const source = [
+        'v=a',
+        'if [[ $1 ]]; then v=; fi',
+        '[[ -n "$v" ]]',
+        'x=0',
+        'if [[ $2 ]]; then x=1; false; fi',
+      ]
+      const strict = analyzeSource(['set -euo pipefail', ...source].join('\n'))
+      expect(getVar(strict, 'v')).toBe('a')
+      expect(getVar(strict, 'x')).toBe('0')
+
+      const relaxed = analyzeSource(['set -e', 'set +e', ...source].join('\n'))
+      expect(getValues(relaxed, 'v')).toEqual(['', 'a'])
+      expect(getValues(relaxed, 'x')).toEqual(['0', '1'])
+    })
+
+    it('dispatches case items on the known values of the subject', () => {
+      const { bindings, ctx } = analyzeSourceWithContext(
+        [
+          'if [[ $1 ]]; then v=linux; else v=mac; fi',
+          'case "$v" in',
+          'linux) a=$v ;;',
+          'mac) b=$v ;;',
+          '*) c=1 ;;',
+          'esac',
+        ].join('\n'),
+      )
+      expect(getVar(bindings, 'a')).toBe('linux')
+      expect(getVar(bindings, 'b')).toBe('mac')
+      expect(bindings.has('c')).toBe(false)
+      expect(ctx.dimmedRanges.map((r) => r.start.line)).toEqual([4])
     })
   })
 
