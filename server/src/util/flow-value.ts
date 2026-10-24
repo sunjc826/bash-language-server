@@ -148,6 +148,51 @@ export function join(a: FlowValue, b: FlowValue): FlowValue {
 }
 
 /**
+ * Whether two flow values describe the same set of values.
+ */
+export function flowValuesEqual(a?: FlowValue, b?: FlowValue): boolean {
+  if (a === b) return true
+  if (!a || !b || a.kind !== b.kind) return false
+  if (a.kind === 'concrete' && b.kind === 'concrete') {
+    const key = (v: ConcreteValue) => JSON.stringify([v.text, v.elements])
+    const bKeys = new Set(b.values.map(key))
+    return a.values.length === b.values.length && a.values.every((v) => bKeys.has(key(v)))
+  }
+  if (a.kind === 'unknown' || a.kind === 'bottom') return true
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/**
+ * Join the bindings of several control-flow paths that meet. A variable bound
+ * on only some paths keeps the values from those paths.
+ */
+export function joinBindings(paths: FlowBindings[]): FlowBindings {
+  const result: FlowBindings = new Map()
+  for (const bindings of paths) {
+    for (const [name, value] of bindings) {
+      const existing = result.get(name)
+      if (!existing) {
+        result.set(name, value)
+      } else if (!flowValuesEqual(existing, value)) {
+        result.set(name, join(existing, value))
+      }
+    }
+  }
+  return result
+}
+
+/**
+ * Whether two sets of bindings bind the same variables to equal values.
+ */
+export function bindingsEqual(a: FlowBindings, b: FlowBindings): boolean {
+  if (a.size !== b.size) return false
+  for (const [name, value] of a) {
+    if (!flowValuesEqual(value, b.get(name))) return false
+  }
+  return true
+}
+
+/**
  * Try to get a single concrete string value, returning null if it's not
  * determinable.
  */
@@ -219,13 +264,12 @@ export function tryGetConcreteValues(fv: FlowValue): string[] {
 }
 
 /**
- * Try to get the array elements from a flow value, or null.
+ * Try to get the array elements from a flow value with a single possible
+ * array value, or null.
  */
 export function tryGetArrayElements(fv: FlowValue): string[] | null {
-  if (fv.kind === 'concrete') {
-    for (const v of fv.values) {
-      if (v.elements) return v.elements
-    }
+  if (fv.kind === 'concrete' && fv.values.length === 1) {
+    return fv.values[0].elements ?? null
   }
   return null
 }

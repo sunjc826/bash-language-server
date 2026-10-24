@@ -509,6 +509,151 @@ describe('FlowAnalyzer', () => {
     })
   })
 
+  // ─── control-flow joins ────────────────────────────────────────
+
+  describe('control-flow joins', () => {
+    function analyzeSource(content: string): FlowBindings {
+      const uri = 'file:///project/script.sh'
+      const tree = parser.parse(content)!
+      return FlowAnalyzer.analyzeFile(makeContext(uri, content, tree))
+    }
+
+    function getValues(bindings: FlowBindings, name: string): string[] {
+      const fv = bindings.get(name)
+      return fv ? tryGetConcreteValues(fv).sort() : []
+    }
+
+    it('resolves an assignment without a value to the empty string', () => {
+      const bindings = analyzeSource(
+        ['e=', 'declare d=', 'a=(x)', 'a[1]=', 's=abc', 's+='].join('\n'),
+      )
+      expect(getVar(bindings, 'e')).toBe('')
+      expect(getVar(bindings, 'd')).toBe('')
+      expect(getVarElements(bindings, 'a')).toEqual(['x', ''])
+      expect(getVar(bindings, 's')).toBe('abc')
+    })
+
+    it('resolves ${!name} through the variable it names', () => {
+      const bindings = analyzeSource(
+        ['a=b', 'b=hello', 'c=${!a}', 'e=', 'f=${!e}', 'p=x', 'q=${!p}'].join('\n'),
+      )
+      expect(getVar(bindings, 'c')).toBe('hello')
+      expect(bindings.get('f')?.kind).toBe('unknown')
+      expect(bindings.get('q')?.kind).toBe('unknown')
+    })
+
+    it('does not persist assignments prefixed to a command', () => {
+      const bindings = analyzeSource('p=1\np= cmd\nq=2 cmd')
+      expect(getVar(bindings, 'p')).toBe('1')
+      expect(bindings.has('q')).toBe(false)
+    })
+
+    it('joins case branches when the subject is unknown', () => {
+      const bindings = analyzeSource(
+        [
+          'x=0',
+          'case "$1" in a) x=1 ;; b) x=2 ;; esac',
+          'y=0',
+          'case "$1" in a) y=1 ;; *) y=2 ;; esac',
+        ].join('\n'),
+      )
+      expect(getValues(bindings, 'x')).toEqual(['0', '1', '2'])
+      expect(getValues(bindings, 'y')).toEqual(['1', '2'])
+    })
+
+    it('joins nested case branches once', () => {
+      const bindings = analyzeSource(
+        [
+          'y=0',
+          'case "$1" in',
+          'a) case "$2" in x) y=1 ;; esac ;;',
+          'b) y=2 ;;',
+          'esac',
+        ].join('\n'),
+      )
+      expect(getValues(bindings, 'y')).toEqual(['0', '1', '2'])
+    })
+
+    it('matches every alternative of a case pattern', () => {
+      const bindings = analyzeSource(
+        ['v=--help', 'case "$v" in -h|--help) h=1 ;; *) h=2 ;; esac'].join('\n'),
+      )
+      expect(getVar(bindings, 'h')).toBe('1')
+    })
+
+    it('stops at a matching case item with an empty body', () => {
+      const bindings = analyzeSource('v=b\ncase "$v" in b) ;; *) x=1 ;; esac')
+      expect(bindings.has('x')).toBe(false)
+    })
+
+    it('analyzes else and elif branches from the state before the if', () => {
+      const bindings = analyzeSource(
+        [
+          'x=0',
+          'if [[ $1 ]]; then x=1; else seen=$x; x=2; fi',
+          'y=0',
+          'if [[ $1 ]]; then y=1; elif [[ $2 ]]; then y=2; fi',
+        ].join('\n'),
+      )
+      expect(getValues(bindings, 'x')).toEqual(['1', '2'])
+      expect(getVar(bindings, 'seen')).toBe('0')
+      expect(getValues(bindings, 'y')).toEqual(['0', '1', '2'])
+    })
+
+    it('keeps every array a variable may hold after a join', () => {
+      const bindings = analyzeSource(
+        [
+          'if [[ $1 ]]; then a=(x); else a=(y z); fi',
+          'r="${a[@]}"',
+          'a+=(w)',
+          'if [[ $1 ]]; then s=1; else s=2; fi',
+          's+=x',
+        ].join('\n'),
+      )
+      expect(getValues(bindings, 'r')).toEqual(['x', 'y z'])
+      expect(bindings.get('a')?.kind).toBe('unknown')
+      expect(bindings.get('s')?.kind).toBe('unknown')
+    })
+
+    it('joins a while loop with the state before it', () => {
+      const bindings = analyzeSource(
+        [
+          'h=false',
+          'while (($#)); do',
+          '  case $1 in -h) h=true ;; esac',
+          '  shift',
+          'done',
+        ].join('\n'),
+      )
+      expect(getValues(bindings, 'h')).toEqual(['false', 'true'])
+    })
+
+    it('carries values between while loop iterations', () => {
+      const bindings = analyzeSource(
+        ['a=1', 'b=1', 'while [[ $1 ]]; do', '  b=$a', '  a=2', 'done'].join('\n'),
+      )
+      expect(getValues(bindings, 'a')).toEqual(['1', '2'])
+      expect(getValues(bindings, 'b')).toEqual(['1', '2'])
+    })
+
+    it('widens values that keep changing across while loop iterations', () => {
+      const bindings = analyzeSource('i=0\nwhile [[ $1 ]]; do i=$((i + 1)); done')
+      expect(bindings.get('i')?.kind).toBe('unknown')
+    })
+
+    it('skips a never-executed while body inside another loop', () => {
+      const bindings = analyzeSource(
+        'x=0\nwhile [[ $1 ]]; do while false; do x=9; done; done',
+      )
+      expect(getVar(bindings, 'x')).toBe('0')
+    })
+
+    it('does not change the working directory when defining a function', () => {
+      const bindings = analyzeSource('f() { cd /tmp; }')
+      expect(getVar(bindings, 'PWD')).toBe('/project')
+    })
+  })
+
   // ─── FlowValue lattice ─────────────────────────────────────────
 
   describe('FlowValue lattice (flow-value.ts)', () => {

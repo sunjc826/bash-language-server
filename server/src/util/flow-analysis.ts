@@ -17,12 +17,15 @@ import { parseBashIdeDirectives } from './bash-ide-directives'
 import { isBashBuiltinVariable } from './bash-builtin-variables'
 import { ConstexprBudget, ConstexprEvaluator } from './constexpr-evaluator'
 import {
+  bindingsEqual,
   concrete,
   concreteArray,
   FlowBindings,
+  flowValuesEqual,
   FlowValue,
   formatFlowValue,
   join,
+  joinBindings,
   resolveFlowVariable,
   tryGetArrayElements,
   tryGetSingleValue,
@@ -77,6 +80,8 @@ export interface FlowAnalysisContext {
    * target as analysis reaches it, keyed by referenceKey().
    */
   referenceValues?: Map<string, FlowValue>
+  /** Set while iterating a loop body to its fixpoint; nested loops take one pass. */
+  inLoopIteration?: boolean
 }
 
 /** Key of a variable_name node in FlowAnalysisContext.referenceValues. */
@@ -156,6 +161,13 @@ interface AnalysisState {
   /** Directory stack for pushd/popd (tracks bash's $DIRSTACK). */
   dirstack: string[]
 }
+
+function copyState(state: AnalysisState): AnalysisState {
+  return { ...state, dirstack: [...state.dirstack] }
+}
+
+/** Iterations of a loop body before still-changing values are widened. */
+const MAX_LOOP_ITERATIONS = 4
 
 export class FlowAnalyzer {
   /**
@@ -308,11 +320,7 @@ export class FlowAnalyzer {
         // and directory changes (cd/pushd/popd) don't affect the parent.
         {
           const subshellBindings = new Map(bindings)
-          const subshellState: AnalysisState = {
-            pwd: state.pwd,
-            oldpwd: state.oldpwd,
-            dirstack: [...state.dirstack],
-          }
+          const subshellState = copyState(state)
           for (const child of node.namedChildren) {
             FlowAnalyzer.analyzeNode(child, subshellBindings, ctx, subshellState)
           }
@@ -470,8 +478,13 @@ export class FlowAnalyzer {
       const existingElements = existing ? tryGetArrayElements(existing) : null
       const elements = existingElements ? [...existingElements] : []
 
-      if (subValueNode && !isNaN(idx)) {
-        const flowValue = FlowAnalyzer.evaluateExpression(subValueNode, bindings, ctx)
+      if (FlowAnalyzer.hasAmbiguousValue(existing)) {
+        bindings.set(varName, unknown())
+      } else if (!isNaN(idx)) {
+        // ARR[0]= assigns the empty string
+        const flowValue = subValueNode
+          ? FlowAnalyzer.evaluateExpression(subValueNode, bindings, ctx)
+          : { success: true, value: concrete('') }
         const val =
           flowValue.success && flowValue.value ? tryGetSingleValue(flowValue.value) : null
         if (val !== null) {
@@ -510,7 +523,12 @@ export class FlowAnalyzer {
         : null
 
     if (!valueNode) {
-      bindings.set(varName, unknown())
+      // VAR= assigns the empty string; VAR+= leaves the value unchanged
+      if (eqIndex >= 0 && node.children[eqIndex].type === '=') {
+        bindings.set(varName, concrete(''))
+      } else if (!bindings.has(varName)) {
+        bindings.set(varName, unknown())
+      }
       return
     }
 
@@ -520,8 +538,9 @@ export class FlowAnalyzer {
       const existing = bindings.get(varName)
       const existingElements = existing ? tryGetArrayElements(existing) : null
 
-      // Check if valueNode is an array
-      if (valueNode.type === 'array') {
+      if (FlowAnalyzer.hasAmbiguousValue(existing)) {
+        bindings.set(varName, unknown())
+      } else if (valueNode.type === 'array') {
         const newElements = FlowAnalyzer.extractArrayElements(valueNode, bindings)
         if (existingElements) {
           bindings.set(varName, concreteArray([...existingElements, ...newElements]))
@@ -536,8 +555,7 @@ export class FlowAnalyzer {
         if (existingElements && newVal !== null) {
           bindings.set(varName, concreteArray([...existingElements, newVal]))
         } else if (existing && newVal !== null) {
-          const oldVal = tryGetSingleValue(existing) || ''
-          bindings.set(varName, concrete(oldVal + newVal))
+          bindings.set(varName, concrete(tryGetSingleValue(existing) + newVal))
         } else {
           bindings.set(varName, unknown())
         }
@@ -607,6 +625,15 @@ export class FlowAnalyzer {
       // If we can't determine the value, set it to unknown
       bindings.set(varName, unknown())
     }
+  }
+
+  /** Whether a bound variable has no single known scalar or array value. */
+  private static hasAmbiguousValue(value: FlowValue | undefined): boolean {
+    return (
+      value !== undefined &&
+      tryGetArrayElements(value) === null &&
+      tryGetSingleValue(value) === null
+    )
   }
 
   /**
@@ -737,9 +764,10 @@ export class FlowAnalyzer {
       default: {
         // For unrecognized commands, still check for : "${VAR:=default}" pattern
         FlowAnalyzer.analyzeColonDefaultPattern(node, bindings, ctx)
-        // Also recurse into arguments to find variable references
+        // Also recurse into arguments to find variable references. Prefix
+        // assignments (VAR=x cmd) only affect the command's environment.
         for (const child of node.namedChildren) {
-          if (child.type !== 'command_name') {
+          if (child.type !== 'command_name' && child.type !== 'variable_assignment') {
             FlowAnalyzer.analyzeNode(child, bindings, ctx, state)
           }
         }
@@ -1302,178 +1330,88 @@ export class FlowAnalyzer {
     ctx: FlowAnalysisContext,
     state: AnalysisState,
   ): void {
-    const conditionNode = FlowAnalyzer.findConditionNode(node)
+    const conditionalClauses = [
+      node,
+      ...node.namedChildren.filter((c) => c.type === 'elif_clause'),
+    ]
+    const elseClause = node.namedChildren.find((c) => c.type === 'else_clause')
 
-    const evalResult = conditionNode
-      ? FlowAnalyzer.evaluateCondition(conditionNode, bindings, ctx)
-      : { success: false }
+    // Every branch starts from the state before the if statement; the state
+    // after it joins the outcomes of the branches that can be taken.
+    const before = new Map(bindings)
+    const outcomes: FlowBindings[] = []
+    let branchTaken = false
 
-    // Find the 'then' keyword index in all children
-    const thenIdx = node.children.findIndex((c) => !c.isNamed && c.type === 'then')
+    for (let i = 0; i < conditionalClauses.length && !branchTaken; i++) {
+      const clause = conditionalClauses[i]
+      const body = FlowAnalyzer.bodyAfterThen(clause)
+      const condition = FlowAnalyzer.findConditionNode(clause)
+      const evalResult: EvalResult = condition
+        ? FlowAnalyzer.evaluateCondition(condition, before, ctx)
+        : { success: false }
 
-    // Collect then-body named children: those after 'then' and before elif/else/fi
-    const thenBodyNodes: SyntaxNode[] = []
-    const elifClauses: SyntaxNode[] = []
-    const elseClauses: SyntaxNode[] = []
-
-    if (thenIdx >= 0) {
-      for (const child of node.namedChildren) {
-        const childStartIdx = child.startIndex
-        const thenStartIdx = node.children[thenIdx].startIndex
-        if (childStartIdx <= thenStartIdx) continue
-        if (child.type === 'elif_clause') {
-          elifClauses.push(child)
-        } else if (child.type === 'else_clause') {
-          elseClauses.push(child)
-        } else {
-          thenBodyNodes.push(child)
-        }
-      }
-    }
-
-    // Helper: analyze a list of body nodes
-    const analyzeBodyNodes = (bodyNodes: SyntaxNode[], b: FlowBindings) => {
-      for (const bodyNode of bodyNodes) {
-        FlowAnalyzer.analyzeNode(bodyNode, b, ctx, state)
-      }
-    }
-
-    // Helper: get range covering all body nodes
-    const bodyNodesRange = (bodyNodes: SyntaxNode[]): LSP.Range | null => {
-      if (bodyNodes.length === 0) return null
-      const first = bodyNodes[0]
-      const last = bodyNodes[bodyNodes.length - 1]
-      return LSP.Range.create(
-        first.startPosition.row,
-        first.startPosition.column,
-        last.endPosition.row,
-        last.endPosition.column,
-      )
-    }
-
-    // If condition is constant truthy, only analyze then branch, dim the rest
-    if (evalResult.success && evalResult.isConstTruthy && thenBodyNodes.length > 0) {
-      analyzeBodyNodes(thenBodyNodes, bindings)
-
-      if (ctx.trackInlayHints) {
-        for (const clause of [...elifClauses, ...elseClauses]) {
-          ctx.dimmedRanges.push(TreeSitterUtil.range(clause))
-        }
-      }
-      return
-    }
-
-    // If condition is constant falsy, dim the then body, analyze else/elifs
-    if (evalResult.success && evalResult.isConstFalsy) {
-      const thenRange = bodyNodesRange(thenBodyNodes)
-      if (thenRange && ctx.trackInlayHints) {
-        ctx.dimmedRanges.push(thenRange)
-      }
-
-      // Analyze elif branches (evaluate each condition)
-      for (const elifClause of elifClauses) {
-        const elifCondition = FlowAnalyzer.findConditionNode(elifClause)
-        // Collect elif body: named children after 'then' within the elif_clause
-        const elifThenIdx = elifClause.children.findIndex(
-          (c) => !c.isNamed && c.type === 'then',
-        )
-        const elifBodyNodes: SyntaxNode[] = []
-        if (elifThenIdx >= 0) {
-          for (const child of elifClause.namedChildren) {
-            if (child.startIndex > elifClause.children[elifThenIdx].startIndex) {
-              elifBodyNodes.push(child)
-            }
-          }
-        }
-
-        if (elifCondition) {
-          const elifEvalResult = FlowAnalyzer.evaluateCondition(
-            elifCondition,
-            bindings,
-            ctx,
+      if (evalResult.success && evalResult.isConstFalsy) {
+        if (ctx.trackInlayHints && body.length > 0) {
+          ctx.dimmedRanges.push(
+            LSP.Range.create(
+              TreeSitterUtil.range(body[0]).start,
+              TreeSitterUtil.range(body[body.length - 1]).end,
+            ),
           )
-          if (elifEvalResult.isConstFalsy) {
-            if (ctx.trackInlayHints) {
-              for (const bn of elifBodyNodes) {
-                ctx.dimmedRanges.push(TreeSitterUtil.range(bn))
-              }
-            }
-            continue
-          }
-          // Truthy elif — analyze its body
-          analyzeBodyNodes(elifBodyNodes, bindings)
-          // Also dim remaining elifs and else
-          if (ctx.trackInlayHints) {
-            const remaining = elifClauses.slice(elifClauses.indexOf(elifClause) + 1)
-            for (const c of [...remaining, ...elseClauses]) {
-              ctx.dimmedRanges.push(TreeSitterUtil.range(c))
-            }
-          }
-          return
         }
-        // Unknown condition — analyze
-        analyzeBodyNodes(elifBodyNodes, bindings)
+        continue
       }
 
-      // Analyze else branches
-      for (const elseClause of elseClauses) {
+      const branch = new Map(before)
+      const discriminant =
+        evalResult.success && condition
+          ? FlowAnalyzer.extractDiscriminant(condition, before, ctx)
+          : null
+      if (discriminant) {
+        FlowAnalyzer.applyDiscriminant(branch, discriminant, 'positive')
+      }
+      for (const bodyNode of body) {
+        FlowAnalyzer.analyzeNode(bodyNode, branch, ctx, state)
+      }
+      outcomes.push(branch)
+
+      if (evalResult.success && evalResult.isConstTruthy) {
+        branchTaken = true
+        if (ctx.trackInlayHints) {
+          const untaken = conditionalClauses.slice(i + 1)
+          if (elseClause) untaken.push(elseClause)
+          for (const clause of untaken) {
+            ctx.dimmedRanges.push(TreeSitterUtil.range(clause))
+          }
+        }
+      }
+    }
+
+    if (!branchTaken) {
+      if (elseClause) {
+        const branch = new Map(before)
         for (const child of elseClause.namedChildren) {
-          FlowAnalyzer.analyzeNode(child, bindings, ctx, state)
+          FlowAnalyzer.analyzeNode(child, branch, ctx, state)
         }
-      }
-      return
-    }
-
-    // Fallback: analyze all branches (standard path-insensitive analysis)
-    const discriminant = evalResult.success
-      ? FlowAnalyzer.extractDiscriminant(conditionNode!, bindings, ctx)
-      : null
-
-    // Analyze then branch with discriminant
-    if (thenBodyNodes.length > 0) {
-      const branchBindings = new Map(bindings)
-      if (discriminant) {
-        FlowAnalyzer.applyDiscriminant(branchBindings, discriminant, 'positive')
-      }
-      analyzeBodyNodes(thenBodyNodes, branchBindings)
-      FlowAnalyzer.mergeBranchBindings(bindings, branchBindings)
-    }
-
-    // Analyze elif branches
-    for (const elifClause of elifClauses) {
-      const elifCondition = FlowAnalyzer.findConditionNode(elifClause)
-      const elifThenIdx = elifClause.children.findIndex(
-        (c) => !c.isNamed && c.type === 'then',
-      )
-      const elifBodyNodes: SyntaxNode[] = []
-      if (elifThenIdx >= 0) {
-        for (const child of elifClause.namedChildren) {
-          if (child.startIndex > elifClause.children[elifThenIdx].startIndex) {
-            elifBodyNodes.push(child)
-          }
-        }
-      }
-      if (elifBodyNodes.length > 0) {
-        const branchBindings = new Map(bindings)
-        if (discriminant && elifCondition) {
-          FlowAnalyzer.applyDiscriminant(branchBindings, discriminant, 'positive')
-        }
-        analyzeBodyNodes(elifBodyNodes, branchBindings)
-        FlowAnalyzer.mergeBranchBindings(bindings, branchBindings)
+        outcomes.push(branch)
+      } else {
+        outcomes.push(before)
       }
     }
 
-    // Analyze else branches
-    for (const elseClause of elseClauses) {
-      const branchBindings = new Map(bindings)
-      if (discriminant) {
-        FlowAnalyzer.applyDiscriminant(branchBindings, discriminant, 'negative')
-      }
-      for (const child of elseClause.namedChildren) {
-        FlowAnalyzer.analyzeNode(child, branchBindings, ctx, state)
-      }
-      FlowAnalyzer.mergeBranchBindings(bindings, branchBindings)
-    }
+    FlowAnalyzer.replaceBindings(bindings, joinBindings(outcomes))
+  }
+
+  /** The body of an if or elif clause: the statements after its `then`. */
+  private static bodyAfterThen(clause: SyntaxNode): SyntaxNode[] {
+    const thenNode = clause.children.find((c) => !c.isNamed && c.type === 'then')
+    if (!thenNode) return []
+    return clause.namedChildren.filter(
+      (c) =>
+        c.startIndex > thenNode.startIndex &&
+        c.type !== 'elif_clause' &&
+        c.type !== 'else_clause',
+    )
   }
 
   /**
@@ -1497,47 +1435,51 @@ export class FlowAnalyzer {
     )
     if (!caseWord) return
 
-    // Resolve the case word value
     const caseValue = FlowAnalyzer.tryResolveValue(caseWord, bindings)
+    const items = node.namedChildren
+      .filter((c) => c.type === 'case_item')
+      .map((item) => {
+        const patterns = item
+          .childrenForFieldName('value')
+          .filter((p): p is SyntaxNode => p !== null)
+        const body = item.namedChildren.filter(
+          (c) => !patterns.some((p) => p.startIndex === c.startIndex),
+        )
+        return { item, patterns, body }
+      })
 
-    // Find case items
-    const caseItems = node.descendantsOfType('case_item')
-    let anyMatched = false
-
-    for (const item of caseItems) {
-      // The pattern is the first named child; the rest are body nodes
-      if (item.namedChildren.length < 2) continue
-      const patternNode = item.namedChildren[0]
-      const bodyNodes = item.namedChildren.slice(1)
-
-      if (bodyNodes.length > 0) {
-        const patternMatches = FlowAnalyzer.checkCasePattern(patternNode, caseValue)
-
-        if (caseValue !== null && patternMatches) {
-          for (const bodyNode of bodyNodes) {
+    // Known value: the first matching item runs; dim the items tried before it
+    if (caseValue !== null) {
+      for (const { item, patterns, body } of items) {
+        if (patterns.some((p) => FlowAnalyzer.checkCasePattern(p, caseValue))) {
+          for (const bodyNode of body) {
             FlowAnalyzer.analyzeNode(bodyNode, bindings, ctx, state)
           }
-          anyMatched = true
-          break
+          return
         }
-
-        if (caseValue !== null && !patternMatches && ctx.trackInlayHints) {
+        if (ctx.trackInlayHints && body.length > 0) {
           ctx.dimmedRanges.push(TreeSitterUtil.range(item))
         }
       }
+      return
     }
 
-    // If no branch matched but we had a known value, still need to analyze none
-    // If the value was unknown, analyze all branches
-    if (!anyMatched && caseValue === null) {
-      for (const item of caseItems) {
-        if (item.namedChildren.length < 2) continue
-        const bodyNodes = item.namedChildren.slice(1)
-        for (const bodyNode of bodyNodes) {
-          FlowAnalyzer.analyzeNode(bodyNode, bindings, ctx, state)
-        }
+    // Unknown value: any item may run, each from the state before the case.
+    // Without a catch-all pattern, no item may run at all.
+    const before = new Map(bindings)
+    const outcomes: FlowBindings[] = []
+    let hasCatchAll = false
+    for (const { patterns, body } of items) {
+      if (patterns.some((p) => p.text.trim() === '*')) hasCatchAll = true
+      const branch = new Map(before)
+      for (const bodyNode of body) {
+        FlowAnalyzer.analyzeNode(bodyNode, branch, ctx, state)
       }
+      outcomes.push(branch)
     }
+    if (!hasCatchAll) outcomes.push(before)
+
+    FlowAnalyzer.replaceBindings(bindings, joinBindings(outcomes))
   }
 
   /**
@@ -1889,7 +1831,7 @@ export class FlowAnalyzer {
       }
       const bodyBindings = new Map(bindings)
       bodyBindings.set(varName, iterationValue)
-      const bodyState = { ...state, dirstack: [...state.dirstack] }
+      const bodyState = copyState(state)
       for (const child of doGroup.namedChildren) {
         FlowAnalyzer.analyzeNode(child, bodyBindings, ctx, bodyState)
       }
@@ -1908,13 +1850,9 @@ export class FlowAnalyzer {
       return
     }
 
-    // Unknown — analyze body with unknown
-    const bodyBindings2 = new Map(bindings)
-    bodyBindings2.set(varName, unknown())
-    for (const child of doGroup.namedChildren) {
-      FlowAnalyzer.analyzeNode(child, bodyBindings2, ctx, state)
-    }
-    FlowAnalyzer.mergeBranchBindings(bindings, bodyBindings2)
+    // Unknown word list — the body runs any number of times with an unknown value
+    bindings.set(varName, unknown())
+    FlowAnalyzer.analyzeLoopBody(doGroup.namedChildren, bindings, ctx, state)
     bindings.set(varName, unknown())
   }
 
@@ -1940,9 +1878,11 @@ export class FlowAnalyzer {
       if (evalResult.success) {
         const shouldRun = isWhile ? evalResult.isConstTruthy : evalResult.isConstFalsy
 
-        if (shouldRun === false && ctx.trackInlayHints) {
+        if (shouldRun === false) {
           // Never executes — dim the body
-          ctx.dimmedRanges.push(TreeSitterUtil.range(doGroup))
+          if (ctx.trackInlayHints) {
+            ctx.dimmedRanges.push(TreeSitterUtil.range(doGroup))
+          }
           return
         }
 
@@ -1956,10 +1896,8 @@ export class FlowAnalyzer {
       }
     }
 
-    // Unknown — analyze body
-    for (const child of doGroup.namedChildren) {
-      FlowAnalyzer.analyzeNode(child, bindings, ctx, state)
-    }
+    // Unknown — the body runs any number of times
+    FlowAnalyzer.analyzeLoopBody(doGroup.namedChildren, bindings, ctx, state)
   }
 
   /**
@@ -2049,25 +1987,69 @@ export class FlowAnalyzer {
       (c) => c.type === 'compound_statement' || c.type === 'subshell',
     )
     if (bodyNode) {
+      // Function bodies are not merged into the parent scope: variables and
+      // directory changes only take effect when the function is called.
       const funcBindings = new Map(bindings)
-      FlowAnalyzer.analyzeNode(bodyNode, funcBindings, ctx, state)
-      // Function bodies are not automatically merged into parent scope
-      // Shell functions only export when called
+      FlowAnalyzer.analyzeNode(bodyNode, funcBindings, ctx, copyState(state))
     }
   }
 
   /**
-   * Merge branch bindings back into the parent.
+   * Analyze a loop body that runs an unknown number of times.
+   *
+   * The state at the loop condition joins the state before the loop with the
+   * state after each iteration. Iterate to that fixpoint without recording
+   * hints, widening values that are still changing after the iteration limit,
+   * then analyze the body once more from it to record hints and references.
    */
-  private static mergeBranchBindings(parent: FlowBindings, branch: FlowBindings): void {
-    for (const [key, value] of branch) {
-      const existing = parent.get(key)
-      if (existing && value !== existing) {
-        parent.set(key, join(existing, value))
-      } else if (!existing) {
-        parent.set(key, value)
-      }
+  private static analyzeLoopBody(
+    body: SyntaxNode[],
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+    state: AnalysisState,
+  ): void {
+    const before = new Map(bindings)
+    const iterationCtx: FlowAnalysisContext = {
+      ...ctx,
+      trackInlayHints: false,
+      referenceValues: undefined,
+      inLoopIteration: true,
     }
+    // Nested loops take a single pass during an outer loop's iterations, so
+    // the cost of nesting stays linear; the outer loop iterates them again.
+    const maxIterations = ctx.inLoopIteration ? 1 : MAX_LOOP_ITERATIONS
+
+    let loopHead: FlowBindings = before
+    for (let i = 1; ; i++) {
+      const iteration = new Map(loopHead)
+      for (const child of body) {
+        FlowAnalyzer.analyzeNode(child, iteration, iterationCtx, copyState(state))
+      }
+      const next = joinBindings([before, iteration])
+      if (bindingsEqual(next, loopHead)) break
+      if (i >= maxIterations) {
+        if (!ctx.inLoopIteration) {
+          for (const [name, value] of next) {
+            if (!flowValuesEqual(value, loopHead.get(name))) next.set(name, unknown())
+          }
+        }
+        loopHead = next
+        break
+      }
+      loopHead = next
+    }
+
+    const lastIteration = new Map(loopHead)
+    for (const child of body) {
+      FlowAnalyzer.analyzeNode(child, lastIteration, ctx, state)
+    }
+    FlowAnalyzer.replaceBindings(bindings, joinBindings([loopHead, lastIteration]))
+  }
+
+  /** Replace the contents of bindings in place, for callers holding the map. */
+  private static replaceBindings(bindings: FlowBindings, next: FlowBindings): void {
+    bindings.clear()
+    for (const [name, value] of next) bindings.set(name, value)
   }
 
   /**
@@ -3052,6 +3034,21 @@ export class FlowAnalyzer {
 
     // Handle array subscript: ${ARR[0]}, ${ARR[@]}, $ARR[@], etc.
     const subscriptNode = node.descendantsOfType('subscript')[0]
+
+    // ${!name} expands the variable named by name's value. The other ! forms
+    // (${!arr[@]}, ${!prefix*}, ${!name:-word}) are not resolved.
+    const operators = node.childrenForFieldName('operator')
+    if (operators[0]?.type === '!') {
+      const target =
+        binding && operators.length === 1 && !subscriptNode
+          ? tryGetSingleValue(binding)
+          : null
+      const targetValue =
+        target !== null && /^[A-Za-z_]\w*$/.test(target)
+          ? bindings.get(target)
+          : undefined
+      return targetValue ? { success: true, value: targetValue } : { success: false }
+    }
     if (subscriptNode) {
       const result = FlowAnalyzer.resolveArraySubscript(
         varName,
