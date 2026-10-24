@@ -1,4 +1,13 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest'
 import * as childProcess from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -6,6 +15,7 @@ import * as path from 'node:path'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 
 import { getMockConnection } from '../../../testing/mocks'
+import Analyzer from '../analyser'
 import LspServer from '../server'
 import { CompletionItemDataType } from '../types'
 import { FigCommand, FigSpecs } from '../util/fig-options'
@@ -119,6 +129,8 @@ describe('FigSpecs.getOptions', () => {
     expect(names(['git', '-C', 'repo', 'commit'], '--a')).toEqual(['--all', '--amend'])
     expect(names(['git', '-C=repo', 'commit'], '--a')).toEqual(['--all', '--amend'])
     expect(names(['git', 'commit', '-m', 'remote'], '--a')).toEqual(['--all', '--amend'])
+    // -C takes the rest of the word as its value.
+    expect(names(['git', '-Crepo', 'commit'], '--a')).toEqual(['--all', '--amend'])
   })
 
   it('suggests and descends into dash-prefixed subcommands', () => {
@@ -150,6 +162,36 @@ describe('FigSpecs.getOptions', () => {
 
   it('stops suggesting options after --', () => {
     expect(names(['git', 'commit', '--'], '-')).toEqual([])
+  })
+})
+
+describe('FigSpecs.describeOption', () => {
+  const describeNames = (words: string[], word: string) =>
+    new FigSpecs(specDirectory)
+      .describeOption(words, word)
+      ?.map((o) => o.description ?? o.name.join()) ?? null
+
+  it('describes options of the subcommand the words reach', () => {
+    expect(describeNames(['git', '-C', 'repo', 'commit'], '--amend')).toEqual([
+      'Amend the previous commit',
+    ])
+    expect(describeNames(['git', 'commit'], '-m')).toEqual(['Commit message'])
+    expect(describeNames(['git', 'commit'], '--message=fix')).toEqual(['Commit message'])
+    expect(describeNames(['git', 'commit'], '--verbose')).toEqual(['Be verbose'])
+    expect(describeNames(['tar'], '--extract')).toEqual(['Extract files from an archive'])
+  })
+
+  it('describes each flag of a chained short option', () => {
+    expect(describeNames(['tar'], '-xzf')).toEqual(['Extract', 'Gzip', 'Archive file'])
+    // Everything after a flag that takes an argument is its value.
+    expect(describeNames(['tar'], '-fxz')).toEqual(['Archive file'])
+    expect(describeNames(['go'], '-Cx')).toEqual(['Not an argument-taking flag'])
+  })
+
+  it('finds nothing for unknown options, operands and commands without a spec', () => {
+    expect(describeNames(['git', 'commit'], '--nope')).toEqual([])
+    expect(describeNames(['git', 'commit', '--'], '--all')).toEqual([])
+    expect(describeNames(['missing'], '--all')).toBeNull()
   })
 })
 
@@ -226,5 +268,73 @@ describe('option completion', () => {
     expect(
       (result as any[]).find((item) => item.label === '--line-buffered'),
     ).not.toHaveProperty('documentation')
+  })
+})
+
+describe('option hover', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  async function hover(
+    text: string,
+    line: number,
+    character: number,
+    explainshellEndpoint = '',
+  ) {
+    const connection = getMockConnection()
+    ;(connection.workspace.getConfiguration as Mock).mockResolvedValue({
+      shellcheckPath: '',
+      explainshellEndpoint,
+    })
+    const server = await LspServer.initialize(connection, {
+      rootUri: null,
+      processId: null,
+      capabilities: { workspace: { configuration: true } },
+    })
+    server.register(connection)
+    await connection.onInitialized.mock.calls[0][0]({})
+    const document = TextDocument.create('file:///options.sh', 'shellscript', 1, text)
+    await server.analyzeAndLintDocument(document)
+    return connection.onHover.mock.calls[0][0](
+      { textDocument: { uri: document.uri }, position: { line, character } },
+      {} as any,
+      {} as any,
+    )
+  }
+
+  it('shows the Fig description of the hovered option', async () => {
+    const describeOption = vi
+      .spyOn(FigSpecs.prototype, 'describeOption')
+      .mockReturnValue([
+        { name: ['-a', '--all'], description: 'Stage all changes' },
+        { name: ['-m', '--message'], description: 'Commit message', argCount: 1 },
+      ])
+
+    expect(await hover('git -C repo commit -am fix\n', 0, 20)).toEqual({
+      contents: {
+        kind: 'markdown',
+        value:
+          '`-a`, `--all`\n\nStage all changes\n\n`-m`, `--message`\n\nCommit message',
+      },
+    })
+    expect(describeOption).toHaveBeenCalledWith(['git', '-C', 'repo', 'commit'], '-am')
+  })
+
+  it('falls through when Fig has no description', async () => {
+    vi.spyOn(FigSpecs.prototype, 'describeOption').mockReturnValue([
+      { name: ['--quiet'] },
+    ])
+    expect(await hover('mytool --quiet\n', 0, 10)).toBeNull()
+  })
+
+  it('prefers explainshell when an endpoint is configured', async () => {
+    vi.spyOn(Analyzer.prototype, 'getExplainshellDocumentation').mockResolvedValue({
+      helpHTML: '<b>explainshell</b>',
+    })
+    const describeOption = vi.spyOn(FigSpecs.prototype, 'describeOption')
+
+    expect(await hover('git commit --amend\n', 0, 13, 'http://localhost:5000')).toEqual({
+      contents: { kind: 'markdown', value: '**explainshell**' },
+    })
+    expect(describeOption).not.toHaveBeenCalled()
   })
 })

@@ -928,6 +928,14 @@ export default class BashServer {
       }
     }
 
+    const optionDocumentation =
+      word.startsWith('-') && !isVariable
+        ? this.getOptionDocumentation(params, word)
+        : null
+    if (optionDocumentation) {
+      return { contents: { kind: 'markdown', value: optionDocumentation } }
+    }
+
     const symbolsMatchingWord = this.analyzer.findDeclarationsMatchingWord({
       exactMatch: true,
       uri: currentUri,
@@ -968,6 +976,34 @@ export default class BashServer {
     }
 
     return null
+  }
+
+  /**
+   * Describe the option word at the given position from the bundled Fig
+   * specs, one paragraph per flag for chained short flags such as `-xzf`.
+   */
+  private getOptionDocumentation(
+    params: LSP.TextDocumentPositionParams,
+    word: string,
+  ): string | null {
+    const commandWords = this.analyzer.commandWordsAtPoint(
+      params.textDocument.uri,
+      params.position.line,
+      params.position.character,
+    )
+    const options = commandWords
+      ? this.figSpecs
+          .describeOption(commandWords, word)
+          ?.filter((option) => option.description)
+      : null
+    if (!options?.length) return null
+
+    return options
+      .map(
+        ({ name, description }) =>
+          `${name.map((n) => `\`${n}\``).join(', ')}\n\n${description}`,
+      )
+      .join('\n\n')
   }
 
   /**
