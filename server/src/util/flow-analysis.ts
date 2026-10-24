@@ -72,7 +72,26 @@ export interface FlowAnalysisContext {
   topLevelUri: string
   /** Constexpr function evaluation context for this analysis pass. */
   constexpr?: ConstexprAnalysisOptions
+  /**
+   * When set, receives the value of each variable reference and assignment
+   * target as analysis reaches it, keyed by referenceKey().
+   */
+  referenceValues?: Map<string, FlowValue>
 }
+
+/** Key of a variable_name node in FlowAnalysisContext.referenceValues. */
+export function referenceKey(position: { row: number; column: number }): string {
+  return `${position.row}:${position.column}`
+}
+
+// Statements whose variable references are recorded before they run.
+const REFERENCE_RECORDING_TYPES = new Set([
+  'command',
+  'declaration_command',
+  'expansion',
+  'simple_expansion',
+  'variable_assignment',
+])
 
 /**
  * Per-analysis constexpr function evaluation context.
@@ -229,6 +248,10 @@ export class FlowAnalyzer {
     ctx: FlowAnalysisContext,
     state: AnalysisState,
   ): void {
+    if (REFERENCE_RECORDING_TYPES.has(node.type)) {
+      FlowAnalyzer.recordReferences(node, bindings, ctx)
+    }
+
     switch (node.type) {
       case 'variable_assignment':
         FlowAnalyzer.analyzeAssignment(node, bindings, ctx)
@@ -310,6 +333,50 @@ export class FlowAnalyzer {
           }
         }
         break
+    }
+
+    if (node.type === 'variable_assignment' || node.type === 'declaration_command') {
+      FlowAnalyzer.recordAssignmentTargets(node, bindings, ctx)
+    }
+  }
+
+  /** Record the current value of each variable referenced within node. */
+  private static recordReferences(
+    node: SyntaxNode,
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+  ): void {
+    if (!ctx.referenceValues) return
+    const expansions =
+      node.type === 'simple_expansion' || node.type === 'expansion'
+        ? [node]
+        : node.descendantsOfType(['simple_expansion', 'expansion'])
+    for (const expansion of expansions) {
+      const nameNode = expansion?.namedChildren.find((c) => c?.type === 'variable_name')
+      if (!nameNode) continue
+      ctx.referenceValues.set(
+        referenceKey(nameNode.startPosition),
+        bindings.get(nameNode.text) ?? unknown(),
+      )
+    }
+  }
+
+  /** Record the value each assignment within node leaves for its target. */
+  private static recordAssignmentTargets(
+    node: SyntaxNode,
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+  ): void {
+    if (!ctx.referenceValues) return
+    const assignments =
+      node.type === 'variable_assignment'
+        ? [node]
+        : node.namedChildren.filter((c) => c?.type === 'variable_assignment')
+    for (const assignment of assignments) {
+      const nameNode = assignment?.childForFieldName('name')
+      if (nameNode?.type !== 'variable_name') continue
+      const value = bindings.get(nameNode.text)
+      if (value) ctx.referenceValues.set(referenceKey(nameNode.startPosition), value)
     }
   }
 
@@ -1814,20 +1881,30 @@ export class FlowAnalyzer {
     }
 
     if (words.length > 0) {
-      // Analyze body with first value (first iteration)
+      // Analyze the body once, with the variable holding any iteration's value.
       // Side effects must merge back (bash for loops don't create subshells)
-      const bodyBindings = new Map(bindings)
-      bodyBindings.set(varName, concrete(words[0]))
-      for (const child of doGroup.namedChildren) {
-        FlowAnalyzer.analyzeNode(child, bodyBindings, ctx, state)
-      }
-      // Merge body side effects back into parent bindings
-      FlowAnalyzer.mergeBranchBindings(bindings, bodyBindings)
-      // Set var to union of all iteration values
-      bindings.set(varName, {
+      const iterationValue: FlowValue = {
         kind: 'concrete',
         values: words.map((p) => ({ text: p, origin: 'assignment' as const })),
-      })
+      }
+      const bodyBindings = new Map(bindings)
+      bodyBindings.set(varName, iterationValue)
+      const bodyState = { ...state, dirstack: [...state.dirstack] }
+      for (const child of doGroup.namedChildren) {
+        FlowAnalyzer.analyzeNode(child, bodyBindings, ctx, bodyState)
+      }
+
+      // After the loop, the shell holds the last iteration's state. Replay
+      // the body for it without emitting hints or references again.
+      const lastIterationCtx: FlowAnalysisContext = {
+        ...ctx,
+        trackInlayHints: false,
+        referenceValues: undefined,
+      }
+      bindings.set(varName, concrete(words[words.length - 1]))
+      for (const child of doGroup.namedChildren) {
+        FlowAnalyzer.analyzeNode(child, bindings, lastIterationCtx, state)
+      }
       return
     }
 
@@ -2329,6 +2406,8 @@ export class FlowAnalyzer {
     bindings: FlowBindings,
     ctx: FlowAnalysisContext,
   ): EvalResult {
+    FlowAnalyzer.recordReferences(node, bindings, ctx)
+
     // Handle [[ ... ]] / [ ... ]
     if (node.type === 'test_command') {
       const children = node.namedChildren

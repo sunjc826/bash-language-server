@@ -394,9 +394,9 @@ describe('FlowAnalyzer', () => {
   describe('loops', () => {
     it('analyzes for loop over literal list', () => {
       const { bindings } = analyzeFixture('loops.sh')
-      // LAST_FRUIT is set by first iteration to "apple"
-      // but the for loop iterates; after loop, LAST_FRUIT = "cherry" (last)
-      expect(getVar(bindings, 'LAST_FRUIT')).toBe('apple') // first iteration only
+      // After the loop, variables hold the last iteration's values
+      expect(getVar(bindings, 'LAST_FRUIT')).toBe('cherry')
+      expect(getVar(bindings, 'fruit')).toBe('cherry')
     })
 
     it('dims while body with false condition', () => {

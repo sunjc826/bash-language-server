@@ -909,6 +909,25 @@ export default class BashServer {
   private async onHover(
     params: LSP.TextDocumentPositionParams,
   ): Promise<LSP.Hover | null> {
+    const hover = await this.getHover(params)
+    const flowValue = this.config.enableFlowAnalysis
+      ? this.getFlowValueMarkdown(params)
+      : null
+    if (!flowValue) return hover
+
+    // Show the flow-resolved value above any declaration documentation.
+    const contents = hover?.contents
+    if (contents && LSP.MarkupContent.is(contents)) {
+      return {
+        contents: { kind: 'markdown', value: `${flowValue}\n\n---\n\n${contents.value}` },
+      }
+    }
+    return { contents: { kind: 'markdown', value: flowValue } }
+  }
+
+  private async getHover(
+    params: LSP.TextDocumentPositionParams,
+  ): Promise<LSP.Hover | null> {
     const word = this.analyzer.wordAtPointFromTextPosition(params)
     const currentUri = params.textDocument.uri
 
@@ -942,12 +961,6 @@ export default class BashServer {
         const errorMessage = error instanceof Error ? error.message : error
         logger.warn(`getExplainshellDocumentation exception: ${String(errorMessage)}`)
       }
-    }
-
-    // Show flow-resolved values for variables with known bindings
-    if (this.config.enableFlowAnalysis) {
-      const flowHover = this.getFlowValueHover(word, currentUri, params.position)
-      if (flowHover) return flowHover
     }
 
     const symbolsMatchingWord = this.analyzer.findDeclarationsMatchingWord({
@@ -993,33 +1006,21 @@ export default class BashServer {
   }
 
   /**
-   * Build a hover showing the flow-resolved value of a variable.
+   * Describe the flow-resolved value of the variable at the given position.
    */
-  private getFlowValueHover(
-    word: string,
-    uri: string,
-    position: LSP.Position,
-  ): LSP.Hover | null {
-    const bindings = this.analyzer.getFlowBindings(uri)
-    if (!bindings) return null
+  private getFlowValueMarkdown(params: LSP.TextDocumentPositionParams): string | null {
+    const flowValue = this.analyzer.getFlowValueAt({
+      uri: params.textDocument.uri,
+      position: params.position,
+    })
+    if (!flowValue) return null
 
-    // Strip $ and ${} prefixes to get the bare variable name
-    let varName = word
-    if (varName.startsWith('$')) {
-      varName = varName.slice(1)
-      if (varName.startsWith('{')) varName = varName.slice(1)
-      if (varName.endsWith('}')) varName = varName.slice(0, -1)
-    }
-
-    const binding = bindings.get(varName)
-    if (!binding) return null
-
-    const label = formatFlowValue(binding)
+    const { name, value } = flowValue
+    const label = formatFlowValue(value)
     if (!label) return null
 
-    const elements = tryGetArrayElements(binding)
-    let markdown = `**$${varName}** ${label}`
-
+    let markdown = `**$${name}** ${label}`
+    const elements = tryGetArrayElements(value)
     if (elements && elements.length > 0) {
       markdown += '\n\n| Index | Value |\n|-------|-------|\n'
       for (let i = 0; i < elements.length; i++) {
@@ -1027,13 +1028,7 @@ export default class BashServer {
       }
       markdown += `\n\nJoined: \`${elements.join(' ')}\``
     }
-
-    return {
-      contents: {
-        kind: 'markdown',
-        value: markdown,
-      },
-    }
+    return markdown
   }
 
   private onReferences(params: LSP.ReferenceParams): LSP.Location[] | null {

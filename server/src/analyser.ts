@@ -25,8 +25,9 @@ import {
   FlowAnalysisContext,
   FlowAnalysisOptions,
   InlayHint,
+  referenceKey,
 } from './util/flow-analysis'
-import { concrete, FlowBindings } from './util/flow-value'
+import { concrete, FlowBindings, FlowValue } from './util/flow-value'
 import { getFilePaths } from './util/fs'
 import { getInputVariableDeclaration, variableNameRange } from './util/input-declarations'
 import { logger } from './util/logger'
@@ -49,6 +50,8 @@ type AnalyzedDocument = {
   tree: Tree
   /** Flow analysis bindings after analysis. */
   flowBindings?: FlowBindings
+  /** Values of variable references where analysis reached them. */
+  flowReferenceValues?: Map<string, FlowValue>
   /** Inlay hints from flow analysis. */
   inlayHints?: InlayHint[]
   /** Dimmed ranges from constexpr branch evaluation. */
@@ -339,6 +342,7 @@ export default class Analyzer {
             cwd: sourcePushd ? path.dirname(sourcedPath) : currentPwd || ctx.cwd,
             initialBindings: sourcedBindings,
             trackInlayHints: false,
+            referenceValues: undefined,
             inlayHints: [],
             dimmedRanges: [],
             sourceErrors: [],
@@ -380,6 +384,7 @@ export default class Analyzer {
       sourceErrors: [],
       constexprErrors: [],
       topLevelUri: uri,
+      referenceValues: new Map(),
     }
 
     // Environment initialization commands run in order before the script.
@@ -400,6 +405,7 @@ export default class Analyzer {
     const flowBindings = FlowAnalyzer.analyzeFile(ctx, constexprOptions)
 
     analyzedDoc.flowBindings = flowBindings
+    analyzedDoc.flowReferenceValues = ctx.referenceValues
     analyzedDoc.inlayHints = ctx.inlayHints
     analyzedDoc.dimmedRanges = ctx.dimmedRanges
     analyzedDoc.sourceErrors = ctx.sourceErrors
@@ -419,6 +425,7 @@ export default class Analyzer {
         content: command,
         rootNode: tree.rootNode,
         trackInlayHints: false,
+        referenceValues: undefined,
         inlayHints: [],
         dimmedRanges: [],
         sourceErrors: [],
@@ -495,6 +502,29 @@ export default class Analyzer {
    */
   public getConstexprErrors(uri: string): LSP.Range[] {
     return this.uriToAnalyzedDocument[uri]?.constexprErrors || []
+  }
+
+  /**
+   * Get the flow-resolved value of the variable referenced or assigned at the
+   * given position, as analysis reached that point.
+   */
+  public getFlowValueAt({
+    uri,
+    position,
+  }: {
+    uri: string
+    position: LSP.Position
+  }): { name: string; value: FlowValue } | null {
+    const analyzedDocument = this.uriToAnalyzedDocument[uri]
+    const node = analyzedDocument?.tree.rootNode.descendantForPosition({
+      row: position.line,
+      column: position.character,
+    })
+    if (node?.type !== 'variable_name') return null
+    const value = analyzedDocument?.flowReferenceValues?.get(
+      referenceKey(node.startPosition),
+    )
+    return value ? { name: node.text, value } : null
   }
 
   /**

@@ -1379,6 +1379,34 @@ describe('server', () => {
         {} as any,
       )
     }
+    it('prepends the flow-resolved value to variable documentation', async () => {
+      const { connection, server } = await initializeServer({
+        initializationOptions: { enableFlowAnalysis: true },
+      })
+      const document = TextDocument.create(
+        'file:///tmp/flow-hover.sh',
+        'shellscript',
+        1,
+        'GREETING=hello\nGREETING=bye\necho "$GREETING"\n',
+      )
+      await server.analyzeAndLintDocument(document)
+      const onHover = connection.onHover.mock.calls[0][0]
+
+      const result = await onHover(
+        { textDocument: { uri: document.uri }, position: { line: 2, character: 8 } },
+        {} as any,
+        {} as any,
+      )
+
+      expect(result).toEqual({
+        contents: {
+          kind: 'markdown',
+          value:
+            '**$GREETING** → bye\n\n---\n\nVariable: **GREETING** - *defined on line 2*',
+        },
+      })
+    })
+
     it('responds with documentation for command', async () => {
       const result = await getHoverResult(FIXTURE_URI.INSTALL, {
         // rm

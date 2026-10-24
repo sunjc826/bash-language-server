@@ -10,7 +10,7 @@ import { Parser, Tree } from 'web-tree-sitter'
 import Analyzer from '../analyser'
 import { Config, getDefaultConfiguration } from '../config'
 import { initializeParser } from '../parser'
-import { tryGetSingleValue } from '../util/flow-value'
+import { tryGetConcreteValues, tryGetSingleValue } from '../util/flow-value'
 
 describe('flow analysis through the analyzer', () => {
   let directory: string
@@ -116,6 +116,44 @@ describe('flow analysis through the analyzer', () => {
 
     expect(value(firstUri, 'COPY')).toBe('first')
     expect(value(secondUri, 'COPY')).toBe('second')
+  })
+
+  describe('values at a position', () => {
+    const text = [
+      'X=one', // 0
+      'echo "$X"', // 1
+      'X=two', // 2
+      'echo "${X}"', // 3
+      'for f in a b; do echo "$f"; done', // 4
+      'if false; then echo "$X"; fi', // 5
+      'echo "$f"', // 6
+    ].join('\n')
+
+    function valuesAt(line: number, character: number) {
+      const uri = write('positions.sh', text)
+      analyze(uri)
+      const result = analyzer.getFlowValueAt({ uri, position: { line, character } })
+      return result && { name: result.name, values: tryGetConcreteValues(result.value) }
+    }
+
+    it('reports the value a reference has where it runs', () => {
+      expect(valuesAt(1, 7)).toEqual({ name: 'X', values: ['one'] })
+      expect(valuesAt(3, 8)).toEqual({ name: 'X', values: ['two'] })
+    })
+
+    it('reports the value an assignment leaves', () => {
+      expect(valuesAt(2, 0)).toEqual({ name: 'X', values: ['two'] })
+    })
+
+    it('reports every iteration value inside a loop and the last after it', () => {
+      expect(valuesAt(4, 24)).toEqual({ name: 'f', values: ['a', 'b'] })
+      expect(valuesAt(6, 7)).toEqual({ name: 'f', values: ['b'] })
+    })
+
+    it('reports nothing for unreachable code or non-variables', () => {
+      expect(valuesAt(5, 22)).toBeNull()
+      expect(valuesAt(1, 1)).toBeNull()
+    })
   })
 
   describe('pathEnvInit', () => {
