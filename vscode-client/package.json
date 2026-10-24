@@ -223,7 +223,7 @@
     "vscode:prepublish": "cd $(realpath .)/.. && pnpm compile"
   },
   "dependencies": {
-    "bash-language-server": "5.8.1",
+    "bash-language-server": "link:../server",
     "vscode-languageclient": "10.1.2",
     "vscode-languageserver": "10.1.1"
   },
