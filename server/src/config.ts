@@ -60,7 +60,7 @@ export const ConfigSchema = z.object({
 
   // Enable flow-sensitive analysis for resolving variable values, constant branch evaluation,
   // and dynamic source resolution. When enabled, inlay hints show resolved variable values
-  // and untaken constexpr branches are dimmed.
+  // and untaken constexpr branches are dimmed. Background analysis is disabled while it is on.
   enableFlowAnalysis: z.boolean().default(false),
 
   // Model the argument-parsing helpers of the BashTab framework in flow

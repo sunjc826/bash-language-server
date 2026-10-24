@@ -190,6 +190,24 @@ describe('server', () => {
     }
   })
 
+  it('disables background analysis while flow analysis is enabled', async () => {
+    const backgroundAnalysis = vi.spyOn(Analyzer.prototype, 'initiateBackgroundAnalysis')
+    try {
+      await initializeServer({
+        initializationOptions: {
+          backgroundAnalysisMaxFiles: 10,
+          enableFlowAnalysis: true,
+        },
+      })
+
+      expect(backgroundAnalysis).toHaveBeenCalledWith(
+        expect.objectContaining({ backgroundAnalysisMaxFiles: 0 }),
+      )
+    } finally {
+      backgroundAnalysis.mockRestore()
+    }
+  })
+
   it('prefers workspace configuration over initialization options', async () => {
     const backgroundAnalysis = vi.spyOn(Analyzer.prototype, 'initiateBackgroundAnalysis')
     try {

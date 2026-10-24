@@ -214,6 +214,8 @@ before traversing them. Custom glob patterns can still target hidden directories
 `["**/node_modules/**", "**/.git/**"]`. Add patterns such as `"**/build/**"` to skip
 large generated directories. These exclusions do not read `.gitignore`.
 Set `backgroundAnalysisMaxFiles` to `0` to disable background discovery entirely.
+Background discovery is also disabled while `enableFlowAnalysis` is on, because flow
+analysis follows sourced files and would exceed the time budget.
 In VS Code, prefix each setting with `bashIde.`. Configuration changes cancel the
 previous scan. Its background-only cache entries are removed when absent from the
 replacement scan, including when newly ignored; opened documents and their sourced
@@ -318,7 +320,7 @@ source "$UNKNOWN"
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `bashIde.enableFlowAnalysis` | `boolean` | `false` | Enable flow-sensitive analysis, inlay hints, branch dimming, and dynamic source resolution |
+| `bashIde.enableFlowAnalysis` | `boolean` | `false` | Enable flow-sensitive analysis, inlay hints, branch dimming, and dynamic source resolution. Disables background analysis |
 | `bashIde.enableBashTabAnalysis` | `boolean` | `false` | Model [BashTab](#bashtab-scripts) argument parsing in flow analysis |
 | `bashIde.seedVariables` | `object` | `{}` | Pre-seeded `{ VAR: value }` map for variables not in the server environment but needed for path resolution |
 | `bashIde.pathEnvInit` | `array` | `[]` | Path-based env init rules (see below) |

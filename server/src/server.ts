@@ -296,9 +296,18 @@ export default class BashServer {
   private async startBackgroundAnalysis(): Promise<{ filesParsed: number }> {
     const { workspaceFolder } = this
     if (workspaceFolder) {
+      // Flow analysis follows sourced files, so analyzing every workspace file
+      // with it can take far longer than the background analysis budget.
+      // Analyzing no files also cancels a running pass and drops its results.
+      const { enableFlowAnalysis } = this.config
+      if (enableFlowAnalysis) {
+        logger.info('BackgroundAnalysis: skipping while flow analysis is enabled')
+      }
       return this.analyzer.initiateBackgroundAnalysis({
         globPattern: this.config.globPattern,
-        backgroundAnalysisMaxFiles: this.config.backgroundAnalysisMaxFiles,
+        backgroundAnalysisMaxFiles: enableFlowAnalysis
+          ? 0
+          : this.config.backgroundAnalysisMaxFiles,
         backgroundAnalysisIgnore: this.config.backgroundAnalysisIgnore,
       })
     }
