@@ -19,7 +19,7 @@ import { Logger } from '../util/logger'
 const CURRENT_URI = 'dummy-uri.sh'
 
 // if you add a .sh file to testing/fixtures, update this value
-const FIXTURE_FILES_MATCHING_GLOB = 21
+const FIXTURE_FILES_MATCHING_GLOB = 39
 
 const defaultConfig = getDefaultConfiguration()
 

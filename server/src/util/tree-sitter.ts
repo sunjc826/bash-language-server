@@ -96,7 +96,12 @@ export function resolveStaticString(node: SyntaxNode): string | null {
     const children = node.namedChildren
     if (children.length === 1 && children[0].type === 'string_content')
       return children[0].text
+    // Multi-line strings split their content at line breaks
+    if (children.every((c) => c?.type === 'string_content')) {
+      return node.text.slice(1, -1)
+    }
     return null
   }
+  if (node.type === 'string_content') return node.text
   return null
 }

@@ -7,6 +7,7 @@ import { Node as SyntaxNode, Tree } from 'web-tree-sitter'
 
 import { parseShellCheckDirective } from '../shellcheck/directive'
 import { discriminate } from './discriminate'
+import { resolveFlowVariable } from './flow-value'
 import { untildify } from './fs'
 import * as TreeSitterUtil from './tree-sitter'
 
@@ -51,10 +52,14 @@ export function getSourceCommands({
     const sourcedPathInfo = getSourcedPathInfoFromNode({ node, isBatsFile })
 
     if (sourcedPathInfo) {
-      const { sourcedPath, parseError } = sourcedPathInfo
-      const uri = sourcedPath
-        ? resolveSourcedUri({ rootPaths, sourcedPath, isBatsFile })
-        : null
+      const { sourcedPath, fallbackSourcedPath, parseError } = sourcedPathInfo
+      const uri =
+        (sourcedPath
+          ? resolveSourcedUri({ rootPaths, sourcedPath, isBatsFile })
+          : null) ??
+        (fallbackSourcedPath
+          ? resolveSourcedUri({ rootPaths, sourcedPath: fallbackSourcedPath, isBatsFile })
+          : null)
 
       sourceCommands.push({
         range: TreeSitterUtil.range(node),
@@ -75,7 +80,12 @@ function getSourcedPathInfoFromNode({
 }: {
   node: SyntaxNode
   isBatsFile: boolean
-}): null | { sourcedPath?: string; parseError?: string } {
+}): null | {
+  sourcedPath?: string
+  // Tried when sourcedPath, resolved from the environment, does not exist.
+  fallbackSourcedPath?: string
+  parseError?: string
+} {
   const sourcingCommands = isBatsFile
     ? [...SOURCING_COMMANDS, ...BATS_SOURCING_COMMANDS]
     : SOURCING_COMMANDS
@@ -144,30 +154,20 @@ function getSourcedPathInfoFromNode({
         }
       }
 
-      // Strip one leading dynamic section.
-      if (argumentNode.type === 'string') {
-        const [variableNode, ...suffixNodes] = argumentNode.namedChildren
-        if (
-          variableNode &&
-          TreeSitterUtil.isExpansion(variableNode) &&
-          suffixNodes.every((child) => child.type === 'string_content')
-        ) {
-          const stringContents = argumentNode.text.slice(1, -1)
-          if (stringContents.startsWith(`${variableNode.text}/`)) {
-            return {
-              sourcedPath: `.${stringContents.slice(variableNode.text.length)}`,
-            }
-          }
+      // Expand simple variable references from the server environment
+      // (e.g. "$HOME/.bashrc"), falling back to stripping a leading
+      // dynamic section when the expanded path does not exist.
+      const environmentPath = resolveWithEnvironment(argumentNode)
+      const fallbackSourcedPath = getPathWithoutLeadingExpansion(argumentNode)
+      if (environmentPath !== null) {
+        return {
+          sourcedPath: environmentPath,
+          fallbackSourcedPath: fallbackSourcedPath ?? undefined,
         }
       }
-
-      if (argumentNode.type === 'concatenation') {
-        // Strip one leading dynamic section from a concatenation node.
-        const sourcedPath = resolveSourceFromConcatenation(argumentNode)
-        if (sourcedPath) {
-          return {
-            sourcedPath,
-          }
+      if (fallbackSourcedPath) {
+        return {
+          sourcedPath: fallbackSourcedPath,
         }
       }
 
@@ -179,6 +179,71 @@ function getSourcedPathInfoFromNode({
     }
   }
 
+  return null
+}
+
+/**
+ * Resolves a word, string or concatenation whose only dynamic parts are
+ * simple variable expansions ($VAR or ${VAR}) using the server environment.
+ */
+function resolveWithEnvironment(node: SyntaxNode): string | null {
+  const resolvePart = (part: SyntaxNode): string | null => {
+    const staticValue = TreeSitterUtil.resolveStaticString(part)
+    if (staticValue !== null) return staticValue
+    if (part.type === 'string_content') return part.text
+
+    if (part.type === 'simple_expansion' || part.type === 'expansion') {
+      const [variableNode, ...modifiers] = part.namedChildren
+      if (variableNode?.type !== 'variable_name' || modifiers.length > 0) return null
+      // ${#VAR}, ${!VAR} and other operators also produce a single variable_name child.
+      if (
+        part.text !== `$${variableNode.text}` &&
+        part.text !== `\${${variableNode.text}}`
+      )
+        return null
+      return resolveFlowVariable(variableNode.text)
+    }
+
+    if (part.type === 'string' || part.type === 'concatenation') {
+      const values: string[] = []
+      for (const child of part.namedChildren) {
+        const value = child ? resolvePart(child) : null
+        if (value === null) return null
+        values.push(value)
+      }
+      return values.join('')
+    }
+
+    return null
+  }
+
+  return resolvePart(node)
+}
+
+/**
+ * Strips one leading dynamic section from a sourced path, so
+ * "$DIR/lib.sh" resolves as "./lib.sh" relative to the root paths.
+ */
+function getPathWithoutLeadingExpansion(argumentNode: SyntaxNode): string | null {
+  // Strip one leading dynamic section.
+  if (argumentNode.type === 'string') {
+    const [variableNode, ...suffixNodes] = argumentNode.namedChildren
+    if (
+      variableNode &&
+      TreeSitterUtil.isExpansion(variableNode) &&
+      suffixNodes.every((child) => child.type === 'string_content')
+    ) {
+      const stringContents = argumentNode.text.slice(1, -1)
+      if (stringContents.startsWith(`${variableNode.text}/`)) {
+        return `.${stringContents.slice(variableNode.text.length)}`
+      }
+    }
+  }
+
+  if (argumentNode.type === 'concatenation') {
+    // Strip one leading dynamic section from a concatenation node.
+    return resolveSourceFromConcatenation(argumentNode)
+  }
   return null
 }
 

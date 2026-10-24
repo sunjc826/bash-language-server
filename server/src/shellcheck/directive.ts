@@ -1,4 +1,11 @@
-const DIRECTIVE_TYPES = ['enable', 'disable', 'source', 'source-path', 'shell'] as const
+const DIRECTIVE_TYPES = [
+  'enable',
+  'disable',
+  'source',
+  'source-path',
+  'source-fallback',
+  'shell',
+] as const
 type DirectiveType = (typeof DIRECTIVE_TYPES)[number]
 
 type Directive =
@@ -16,6 +23,10 @@ type Directive =
     }
   | {
       type: 'source-path'
+      path: string
+    }
+  | {
+      type: 'source-fallback'
       path: string
     }
   | {
@@ -49,11 +60,11 @@ export function parseShellCheckDirective(line: string): Directive[] {
       continue
     }
 
-    if (type === 'source-path' || type === 'source') {
+    if (type === 'source-path' || type === 'source' || type === 'source-fallback') {
       directives.push({
         type,
         path: directiveValue,
-      })
+      } as Directive)
     } else if (type === 'shell') {
       directives.push({
         type,

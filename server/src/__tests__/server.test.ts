@@ -107,9 +107,32 @@ describe('server', () => {
         "documentHighlightProvider": true,
         "documentSymbolProvider": true,
         "hoverProvider": true,
+        "inlayHintProvider": {
+          "resolveProvider": false,
+        },
         "referencesProvider": true,
         "renameProvider": {
           "prepareProvider": true,
+        },
+        "semanticTokensProvider": {
+          "full": true,
+          "legend": {
+            "tokenModifiers": [
+              "embedded",
+            ],
+            "tokenTypes": [
+              "keyword",
+              "string",
+              "number",
+              "comment",
+              "operator",
+              "variable",
+              "function",
+              "type",
+              "parameter",
+              "decorator",
+            ],
+          },
         },
         "textDocumentSync": 1,
         "workspaceSymbolProvider": true,
@@ -911,6 +934,42 @@ describe('server', () => {
           },
         ]
       `)
+    })
+
+    it('returns file completions and no commands when completing a path', async () => {
+      const { connection } = await initializeServer()
+      const onCompletion = connection.onCompletion.mock.calls[0][0]
+
+      const result = await onCompletion(
+        {
+          textDocument: { uri: FIXTURE_URI.PATH_COMPLETION },
+          position: {
+            // bu_env_append_path "$HOME"/
+            line: 7, // LSP 0-indexed: file line 8
+            character: 27, // right after the /
+          },
+        },
+        {} as any,
+        {} as any,
+      )
+
+      expect(result).not.toBeNull()
+      expect(Array.isArray(result)).toBe(true)
+
+      // Should be a small set: reserved words + snippets + file completions
+      // Not 1000+ PATH commands
+      const totalCount = (result as any[]).length
+      expect(totalCount).toBeLessThan(200)
+
+      // Should NOT include any completion with kind Function (commands/builtins)
+      const commandCompletions = (result as any[]).filter((item: any) => item.kind === 3)
+      expect(commandCompletions.length).toBe(0)
+
+      // Should include file/folder completions from the resolved path
+      const fileCompletions = (result as any[]).filter(
+        (item: any) => item.kind === 17 || item.kind === 19,
+      )
+      expect(fileCompletions.length).toBeGreaterThan(0)
     })
   })
 

@@ -58,6 +58,22 @@ export const ConfigSchema = z.object({
     .array(z.string())
     .default(['**/node_modules/**', '**/.git/**']),
 
+  // Enable flow-sensitive analysis for resolving variable values, constant branch evaluation,
+  // and dynamic source resolution. When enabled, inlay hints show resolved variable values
+  // and untaken constexpr branches are dimmed.
+  enableFlowAnalysis: z.boolean().default(false),
+
+  // Enable opt-in constexpr function evaluation. Functions marked with
+  // `# bash-ide constexpr` may be executed in a sandboxed bash process at
+  // analysis time to resolve command substitutions.
+  constexprFunctionsEnabled: z.boolean().default(false),
+
+  // Per-call timeout (ms) for constexpr function evaluation.
+  constexprFunctionTimeout: z.number().int().min(1).default(2000),
+
+  // How long (ms) successful constexpr results are cached.
+  constexprFunctionCacheTtl: z.number().int().min(0).default(60000),
+
   // Enable diagnostics for source errors. Ignored if includeAllWorkspaceSymbols is true.
   enableSourceErrorDiagnostics: z.boolean().default(false),
 
@@ -103,6 +119,34 @@ export const ConfigSchema = z.object({
   shellcheckPath: z.string().trim().default('shellcheck'),
 
   shfmt: ShfmtConfigSchema.prefault({}),
+
+  // Pre-seeded variable values for flow analysis. Use this to inject variable
+  // bindings for variables not present in the server environment but needed
+  // to resolve source paths or directives.
+  // Example: { "MY_LIB_DIR": "/opt/libs" }
+  seedVariables: z.record(z.string(), z.string()).default({}),
+
+  // Path-based environment initialization rules. An array of rules where, when
+  // a file path matches the glob pattern (with (*) capture groups), variables
+  // are seeded and envInit is sourced to inject bindings before analysis.
+  // sourcePushd-only rules apply additively.
+  // Example:
+  // [{
+  //   "path": "projects/(*)/*.sh",
+  //   "variables": { "PROJECT": "$1" },
+  //   "envInit": "source /opt/$1/env.sh",
+  //   "sourcePushd": true
+  // }]
+  pathEnvInit: z
+    .array(
+      z.object({
+        path: z.string(),
+        envInit: z.string().optional(),
+        variables: z.record(z.string(), z.string()).optional(),
+        sourcePushd: z.boolean().optional(),
+      }),
+    )
+    .default([]),
 })
 
 // Initialization options override only supplied settings, preserving environment defaults.
@@ -149,6 +193,12 @@ export function getConfigFromEnvironmentVariables(): {
       simplifyCode: toBoolean(process.env.SHFMT_SIMPLIFY_CODE),
       spaceRedirects: toBoolean(process.env.SHFMT_SPACE_REDIRECTS),
     },
+    enableFlowAnalysis: toBoolean(process.env.ENABLE_FLOW_ANALYSIS),
+    constexprFunctionsEnabled: toBoolean(process.env.CONSTEXPR_FUNCTIONS_ENABLED),
+    constexprFunctionTimeout: toNumber(process.env.CONSTEXPR_FUNCTION_TIMEOUT),
+    constexprFunctionCacheTtl: toNumber(process.env.CONSTEXPR_FUNCTION_CACHE_TTL),
+    seedVariables: {},
+    pathEnvInit: [],
   }
 
   const environmentVariablesUsed = Object.entries(rawConfig)
