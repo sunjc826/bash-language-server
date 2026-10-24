@@ -74,10 +74,9 @@ export class FigSpecs {
    */
   public describeOption(words: string[], word: string): FigOption[] | null {
     const context = this.optionContext(words)
-    return context
-      ? parseOptionWord(word, context.options, context.command.posixNoncompliant === true)
-          .options
-      : null
+    if (!context) return null
+    if (context.options.length === 0) return []
+    return this.parseOptionWordIn(word, context.command, context.persistent).options
   }
 
   /**
@@ -87,7 +86,7 @@ export class FigSpecs {
    */
   private optionContext(
     words: string[],
-  ): { command: FigCommand; options: FigOption[] } | null {
+  ): { command: FigCommand; persistent: FigOption[]; options: FigOption[] } | null {
     const [name, ...args] = words
     if (!name || !COMMAND_NAME.test(name)) {
       return null
@@ -98,39 +97,84 @@ export class FigSpecs {
       return null
     }
 
-    const persistent: FigOption[] = []
+    let persistent: FigOption[] = []
     for (let i = 0; i < args.length; i++) {
       const token = args[i]
       if (token === '--') {
         // Everything after `--` is an operand.
-        return { command, options: [] }
+        return { command, persistent, options: [] }
       }
 
       // Some specs model modes as dash-prefixed subcommands (e.g. `tar -x`).
       const subcommand = command.subcommands?.find((s) => s.name.includes(token))
       if (subcommand) {
-        persistent.push(...(command.options ?? []).filter((o) => o.isPersistent))
+        persistent = [...persistent, ...persistentOptions(command)]
         command = this.resolveSubcommand(subcommand)
       } else if (token.startsWith('-')) {
-        const { options, hasValue } = parseOptionWord(
-          token,
-          [...(command.options ?? []), ...persistent],
-          command.posixNoncompliant === true,
-        )
-        const last = options[options.length - 1]
-        if (last?.argCount && !hasValue) {
+        const parsed = this.parseOptionWordIn(token, command, persistent)
+        ;({ command, persistent } = parsed)
+        const last = parsed.options[parsed.options.length - 1]
+        if (last?.argCount && !parsed.hasValue) {
           i += last.argCount
         }
       }
     }
 
-    const optionLikeSubcommands = (command.subcommands ?? []).filter((s) =>
-      s.name.some((n) => n.startsWith('-')),
-    )
     return {
       command,
-      options: [...(command.options ?? []), ...persistent, ...optionLikeSubcommands],
+      persistent,
+      options: [
+        ...(command.options ?? []),
+        ...persistent,
+        ...optionLikeSubcommands(command),
+      ],
     }
+  }
+
+  /**
+   * Parse an option word in a command. A group of short flags that includes
+   * a dash-prefixed subcommand, such as the mode in `tar -xzf` or `tar -zxf`,
+   * enters that subcommand, and all of the group's flags are read there.
+   */
+  private parseOptionWordIn(
+    word: string,
+    command: FigCommand,
+    persistent: FigOption[],
+  ): {
+    options: FigOption[]
+    hasValue: boolean
+    command: FigCommand
+    persistent: FigOption[]
+  } {
+    const options = [...(command.options ?? []), ...persistent]
+    const modes = optionLikeSubcommands(command)
+    const posixNoncompliant = command.posixNoncompliant === true
+    const name = word.split('=')[0]
+    const mode =
+      !posixNoncompliant &&
+      /^-[^-]{2,}$/.test(name) &&
+      !options.some((o) => o.name.includes(name))
+        ? modes.find((m) =>
+            name
+              .slice(1)
+              .split('')
+              .some((flag) => m.name.includes(`-${flag}`)),
+          )
+        : undefined
+
+    if (!mode) {
+      const parsed = parseOptionWord(word, [...options, ...modes], posixNoncompliant)
+      return { ...parsed, command, persistent }
+    }
+
+    const modeCommand = this.resolveSubcommand(mode)
+    const modePersistent = [...persistent, ...persistentOptions(command)]
+    const parsed = parseOptionWord(
+      word,
+      [mode, ...(modeCommand.options ?? []), ...modePersistent],
+      false,
+    )
+    return { ...parsed, command: modeCommand, persistent: modePersistent }
   }
 
   private resolveSubcommand(subcommand: FigCommand): FigCommand {
@@ -158,6 +202,15 @@ export class FigSpecs {
     this.cache.set(key, spec)
     return spec
   }
+}
+
+function persistentOptions(command: FigCommand): FigOption[] {
+  return (command.options ?? []).filter((o) => o.isPersistent)
+}
+
+// Some specs model modes as dash-prefixed subcommands (e.g. `tar -x`).
+function optionLikeSubcommands(command: FigCommand): FigCommand[] {
+  return (command.subcommands ?? []).filter((s) => s.name.some((n) => n.startsWith('-')))
 }
 
 /**

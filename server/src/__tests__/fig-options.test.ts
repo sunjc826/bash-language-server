@@ -50,19 +50,38 @@ const SPECS: Record<string, FigCommand> = {
     options: [{ name: ['--add'], description: 'Add a remote' }],
   },
   outside: { name: ['outside'], options: [{ name: ['--leak'] }] },
+  pack: {
+    name: ['pack'],
+    options: [
+      { name: ['-x'], description: 'Extract' },
+      { name: ['-z'], description: 'Gzip' },
+      { name: ['-f'], description: 'Archive file', argCount: 1 },
+    ],
+  },
+  // Shaped like the real tar spec: modes are dash-prefixed subcommands that
+  // hold the flags, and top-level flags apply in every mode.
   tar: {
     name: ['tar'],
     subcommands: [
       {
         name: ['x', '-x', '--extract'],
         description: 'Extract files from an archive',
-        options: [{ name: ['--strip-components'], argCount: 1 }],
+        options: [
+          { name: ['z', '-z', '--gzip'], description: 'Filter through gzip' },
+          { name: ['f', '-f', '--file'], description: 'Archive file', argCount: 1 },
+          { name: ['--strip-components'], argCount: 1 },
+        ],
+      },
+      {
+        name: ['c', '-c', '--create'],
+        description: 'Create a new archive',
+        options: [
+          { name: ['f', '-f', '--file'], description: 'Archive file', argCount: 1 },
+        ],
       },
     ],
     options: [
-      { name: ['-x'], description: 'Extract' },
-      { name: ['-z'], description: 'Gzip' },
-      { name: ['-f'], description: 'Archive file', argCount: 1 },
+      { name: ['v', '-v', '--verbose'], description: 'Verbose', isPersistent: true },
     ],
   },
   go: {
@@ -137,12 +156,26 @@ describe('FigSpecs.getOptions', () => {
     expect(new FigSpecs(specDirectory).getOptions(['tar'], '--e')).toEqual([
       { name: '--extract', description: 'Extract files from an archive' },
     ])
-    expect(names(['tar', '--extract'], '--')).toEqual(['--strip-components'])
+    expect(names(['tar', '--extract'], '--')).toEqual([
+      '--gzip',
+      '--file',
+      '--strip-components',
+      '--verbose',
+    ])
   })
 
   it('treats the last chained short flag as taking an argument', () => {
-    expect(names(['tar', '-xzf', '-'], '-')).toEqual(['-x', '-z', '-f', '--extract'])
-    expect(names(['tar', '-xzf', 'archive.tgz', '--'], '-')).toEqual([])
+    expect(names(['pack', '-xzf', '-'], '-')).toEqual(['-x', '-z', '-f'])
+    expect(names(['pack', '-xzf', 'archive.tgz', '--'], '-')).toEqual([])
+  })
+
+  it('enters the mode named in a group of short flags', () => {
+    for (const group of ['-xzf', '-zxf', '-xvzf']) {
+      expect(names(['tar', group, 'archive.tgz'], '--s')).toEqual(['--strip-components'])
+    }
+    // The archive name is -f's value, not a mode.
+    expect(names(['tar', '-xf', '-c'], '--s')).toEqual(['--strip-components'])
+    expect(names(['tar', '-cf', 'out.tar'], '--s')).toEqual([])
   })
 
   it('does not split single-dash options for POSIX-noncompliant specs', () => {
@@ -182,10 +215,23 @@ describe('FigSpecs.describeOption', () => {
   })
 
   it('describes each flag of a chained short option', () => {
-    expect(describeNames(['tar'], '-xzf')).toEqual(['Extract', 'Gzip', 'Archive file'])
+    expect(describeNames(['pack'], '-xzf')).toEqual(['Extract', 'Gzip', 'Archive file'])
     // Everything after a flag that takes an argument is its value.
-    expect(describeNames(['tar'], '-fxz')).toEqual(['Archive file'])
+    expect(describeNames(['pack'], '-fxz')).toEqual(['Archive file'])
     expect(describeNames(['go'], '-Cx')).toEqual(['Not an argument-taking flag'])
+  })
+
+  it('describes a tar mode and the flags grouped with it', () => {
+    expect(describeNames(['tar'], '-xvzf')).toEqual([
+      'Extract files from an archive',
+      'Verbose',
+      'Filter through gzip',
+      'Archive file',
+    ])
+    expect(describeNames(['tar'], '-cf')).toEqual([
+      'Create a new archive',
+      'Archive file',
+    ])
   })
 
   it('finds nothing for unknown options, operands and commands without a spec', () => {

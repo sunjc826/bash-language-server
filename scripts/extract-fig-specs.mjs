@@ -14,6 +14,12 @@ const outDir = path.resolve(process.argv[2] ?? 'server/out/fig-specs')
 // These cloud CLI specs are about 60 MB of the ~70 MB output, so leave them
 // out (spec and subcommand files alike) and let bash-completion handle them.
 const EXCLUDED_SPECS = new Set(['aws', 'az', 'gcloud'])
+// Corrections to specs whose parser directives do not match the command.
+const SPEC_OVERRIDES = {
+  // The tar spec marks its flags POSIX-noncompliant for the old `tar xzf`
+  // form, but `tar -xzf` groups short options like any other command.
+  tar: (command) => ({ ...command, posixNoncompliant: undefined }),
+}
 const buildDir = path.dirname(
   createRequire(import.meta.url).resolve('@withfig/autocomplete'),
 )
@@ -95,11 +101,12 @@ let skipped = 0
 for await (const { file, key } of specFiles(buildDir)) {
   const spec = (await import(pathToFileURL(file).href)).default
   // Versioned and dynamic specs are functions that compute the spec at runtime.
-  const command = typeof spec === 'object' ? convertCommand(spec) : undefined
-  if (!command) {
+  const converted = typeof spec === 'object' ? convertCommand(spec) : undefined
+  if (!converted) {
     skipped++
     continue
   }
+  const command = SPEC_OVERRIDES[key]?.(converted) ?? converted
 
   const target = path.join(outDir, `${key}.json`)
   await mkdir(path.dirname(target), { recursive: true })
