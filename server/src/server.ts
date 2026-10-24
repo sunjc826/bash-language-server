@@ -18,11 +18,10 @@ import { Formatter } from './shfmt'
 import { SNIPPETS } from './snippets'
 import { BashCompletionItem, CompletionItemDataType } from './types'
 import {
-  getCompgenCompletions,
   getFileCompletions,
   isFilePathContext,
   resolveConcatenationPath,
-} from './util/compgen'
+} from './util/path-completion'
 import { formatFlowValue, tryGetArrayElements } from './util/flow-value'
 import { getEmbeddedSemanticTokens, SEMANTIC_TOKEN_LEGEND } from './util/embedded-tokens'
 import { uniqueBasedOnHash } from './util/array'
@@ -553,30 +552,7 @@ export default class BashServer {
 
     this.logRequest({ request: 'onCompletion', params, word })
 
-    // DEBUG: log completion context
-    const wordCol = Math.max(params.position.character - 1, 0)
-    const cmdAtPoint = this.analyzer.commandNameAtPoint(
-      params.textDocument.uri,
-      params.position.line,
-      wordCol,
-    )
-    const concatText = this.analyzer.getConcatenationTextAtPoint(
-      params.textDocument.uri,
-      params.position.line,
-      wordCol,
-    )
-    const isPathCtx =
-      (word && isFilePathContext(word)) || (word === null && cmdAtPoint !== null)
-    logger.info(
-      `[completion] L${params.position.line}C${params.position.character} ` +
-        `word=${JSON.stringify(word)} isPathCtx=${isPathCtx} cmd=${JSON.stringify(
-          cmdAtPoint,
-        )} ` +
-        `concat=${JSON.stringify(concatText)}`,
-    )
-
     if (word?.startsWith('#')) {
-      logger.info(`[completion] entering comment handler: word=${JSON.stringify(word)}`)
       // Inside a comment block — check for shellcheck source=/source-fallback= directive completion
       return this.getShellcheckDirectiveCompletions(params, word)
     }
@@ -785,28 +761,6 @@ export default class BashServer {
       }))
     }
 
-    // Compgen-based command completions (when not completing options)
-    let compgenCompletions: BashCompletionItem[] = []
-    if (word && !word.startsWith('-') && !word.startsWith('$')) {
-      try {
-        const commands = getCompgenCompletions('command', word)
-        const seen = new Set<string>()
-        compgenCompletions = commands
-          .filter((cmd) => {
-            if (seen.has(cmd)) return false
-            seen.add(cmd)
-            return true
-          })
-          .map((cmd) => ({
-            label: cmd,
-            kind: LSP.CompletionItemKind.Function,
-            data: { type: CompletionItemDataType.Executable },
-          }))
-      } catch {
-        // compgen not available, skip
-      }
-    }
-
     const allCompletions = [
       // Don't suggest anything but file completions when in a path context
       ...(isPathContext ? [] : reservedWordsCompletions),
@@ -815,21 +769,14 @@ export default class BashServer {
       ...(isPathContext ? [] : builtinsCompletions),
       ...optionsCompletions,
       ...filePathCompletions,
-      ...(isPathContext ? [] : compgenCompletions),
       ...(isPathContext || !supportsSnippets ? [] : SNIPPETS),
     ]
 
     if (word && !isPathContext) {
-      const filtered = allCompletions.filter((item) => item.label.startsWith(word))
-      logger.info(
-        `[completion] returning ${filtered.length} filtered items (word filter)`,
-      )
-      return filtered
+      // Filter to only return suffixes of the current word
+      return allCompletions.filter((item) => item.label.startsWith(word))
     }
 
-    logger.info(
-      `[completion] returning ${allCompletions.length} items (total), fileComps=${filePathCompletions.length}`,
-    )
     return allCompletions
   }
 
