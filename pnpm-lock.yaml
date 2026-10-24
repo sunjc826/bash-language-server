@@ -175,6 +175,9 @@ importers:
       '@vitest/coverage-v8':
         specifier: 5.0.3
         version: 5.0.3(vitest@5.0.3)
+      '@withfig/autocomplete':
+        specifier: 2.692.3
+        version: 2.692.3
       cross-spawn:
         specifier: 7.0.6
         version: 7.0.6
@@ -192,7 +195,7 @@ importers:
         version: 6.0.3
       vitest:
         specifier: 5.0.3
-        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(vite@8.3.0(@types/node@22.20.5))
+        version: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(vite@8.3.0(@types/node@22.20.5)(yaml@2.9.1))
       vscode-languageserver:
         specifier: 10.1.1
         version: 10.1.1
@@ -259,6 +262,12 @@ packages:
   '@bcoe/v8-coverage@1.0.2':
     resolution: {integrity: sha512-6zABk/ECA/QYSCQ1NGiVwwbQerUCZ+TQbp64Q3AgmfNvurHH0j8TtXa1qbShXA6qqkpAj4V5W8pP6mLe1mcMqA==}
     engines: {node: '>=18'}
+
+  '@fig/autocomplete-generators@2.4.0':
+    resolution: {integrity: sha512-fiaaCGmsgnbUJbVbNAcVDmrnCGj/SmfarK6WKt/lfQP9k1hLHkkmZQ836VSMJvPP1vAKFAiXpdJziG6EGyjAYg==}
+
+  '@fig/autocomplete-helpers@1.0.7':
+    resolution: {integrity: sha512-5jq01q2JtaLAjl8t3hOvE9GOp4a4Agj7YmxlBxRjuSwJY3qskfx/mdAgOX2qjgxZ74bHONAxQ1hzudwSICqZFg==}
 
   '@jridgewell/resolve-uri@3.1.2':
     resolution: {integrity: sha512-bRISgCIjP20/tbWSPWMEi54QVPRZExkuD9lJL+UIxUKtwVJA8wW1Trb1jMs1RFXo1CBTNZ/5hpC9QvmKWdopKw==}
@@ -594,6 +603,10 @@ packages:
   '@vitest/spy@5.0.3':
     resolution: {integrity: sha512-XhFysQTB8AZ+P4gMi+Lpo99vg2AZi0qKpaB9yXQl37+CaMEAPO3iH/wGVnSyL5MPERiLezpqTVtrR6UZH5GCXg==}
 
+  '@withfig/autocomplete@2.692.3':
+    resolution: {integrity: sha512-zxN7K8W+qWGc2ejWksd92xwAyCZ0faHvnk3c7jUoWkkk5e5iQf3/4mOLheFvYLoUWR5a36571VJ1DdyxmAWJZA==}
+    engines: {node: '>=20', pnpm: '>=9'}
+
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
     engines: {node: '>=12'}
@@ -871,6 +884,10 @@ packages:
   std-env@4.2.0:
     resolution: {integrity: sha512-oCUKSupKTHX53EyjDtuZQ64pjLJ6yYCtpmEw0goYxtjG9KpbRe8KAsl2tBUGU9DyMcJ0RwJ8GqJAFzMXcXW1Rw==}
 
+  strip-json-comments@5.0.3:
+    resolution: {integrity: sha512-1tB5mhVo7U+ETBKNf92xT4hrQa3pm0MZ0PQvuDnWgAAGHDsfp4lPSpiS6psrSiet87wyGPh9ft6wmhOMQ0hDiw==}
+    engines: {node: '>=14.16'}
+
   tinybench@6.1.4:
     resolution: {integrity: sha512-9APumHG7r4yOk4X4WlkmE71aZcv1gvin1czO3OQ1U9iJcFA5Ja/ygyb0vPOVHTthFozUYs8CLoLUlM8grb2lTQ==}
     engines: {node: '>=20.0.0'}
@@ -894,6 +911,11 @@ packages:
   turndown@7.2.4:
     resolution: {integrity: sha512-I8yFsfRzmzK0WV1pNNOA4A7y4RDfFxPRxb3t+e3ui14qSGOxGtiSP6GjeX+Y6CHb7HYaFj7ECUD7VE5kQMZWGQ==}
     engines: {node: '>=18', npm: '>=9'}
+
+  typescript@4.9.5:
+    resolution: {integrity: sha512-1FXk9E2Hm+QzZQ7z+McJiHL4NW1F2EzMu9Nq9i3zAaGqibafqYwCVU6WyWAuyQRRzOlxou8xZSyXLEN8oKj24g==}
+    engines: {node: '>=4.2.0'}
+    hasBin: true
 
   typescript@6.0.3:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
@@ -1017,6 +1039,11 @@ packages:
     engines: {node: '>=20.11'}
     hasBin: true
 
+  yaml@2.9.1:
+    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
   zod@4.6.5:
     resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
 
@@ -1036,6 +1063,13 @@ snapshots:
       '@babel/helper-validator-identifier': 7.29.7
 
   '@bcoe/v8-coverage@1.0.2': {}
+
+  '@fig/autocomplete-generators@2.4.0': {}
+
+  '@fig/autocomplete-helpers@1.0.7':
+    dependencies:
+      semver: 7.8.5
+      typescript: 4.9.5
 
   '@jridgewell/resolve-uri@3.1.2': {}
 
@@ -1215,7 +1249,7 @@ snapshots:
       obug: 2.2.1
       std-env: 4.2.0
       tinyrainbow: 3.1.1
-      vitest: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(vite@8.3.0(@types/node@22.20.5))
+      vitest: 5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(vite@8.3.0(@types/node@22.20.5)(yaml@2.9.1))
 
   '@vitest/istanbul-lib-coverage@1.0.1': {}
 
@@ -1223,16 +1257,24 @@ snapshots:
     dependencies:
       '@vitest/istanbul-lib-coverage': 1.0.1
 
-  '@vitest/mocker@5.0.3(vite@8.3.0(@types/node@22.20.5))':
+  '@vitest/mocker@5.0.3(vite@8.3.0(@types/node@22.20.5)(yaml@2.9.1))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.0.3
       estree-walker: 3.0.3
       magic-string: 1.4.1
     optionalDependencies:
-      vite: 8.3.0(@types/node@22.20.5)
+      vite: 8.3.0(@types/node@22.20.5)(yaml@2.9.1)
 
   '@vitest/spy@5.0.3': {}
+
+  '@withfig/autocomplete@2.692.3':
+    dependencies:
+      '@fig/autocomplete-generators': 2.4.0
+      '@fig/autocomplete-helpers': 1.0.7
+      semver: 7.8.5
+      strip-json-comments: 5.0.3
+      yaml: 2.9.1
 
   assertion-error@2.0.1: {}
 
@@ -1483,6 +1525,8 @@ snapshots:
 
   std-env@4.2.0: {}
 
+  strip-json-comments@5.0.3: {}
+
   tinybench@6.1.4: {}
 
   tinyexec@1.3.0: {}
@@ -1502,11 +1546,13 @@ snapshots:
     dependencies:
       '@mixmark-io/domino': 2.2.0
 
+  typescript@4.9.5: {}
+
   typescript@6.0.3: {}
 
   undici-types@6.21.0: {}
 
-  vite@8.3.0(@types/node@22.20.5):
+  vite@8.3.0(@types/node@22.20.5)(yaml@2.9.1):
     dependencies:
       lightningcss: 1.33.0
       picomatch: 4.0.7
@@ -1516,11 +1562,12 @@ snapshots:
     optionalDependencies:
       '@types/node': 22.20.5
       fsevents: 2.3.3
+      yaml: 2.9.1
 
-  vitest@5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(vite@8.3.0(@types/node@22.20.5)):
+  vitest@5.0.3(@types/node@22.20.5)(@vitest/coverage-v8@5.0.3)(vite@8.3.0(@types/node@22.20.5)(yaml@2.9.1)):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.3(vite@8.3.0(@types/node@22.20.5))
+      '@vitest/mocker': 5.0.3(vite@8.3.0(@types/node@22.20.5)(yaml@2.9.1))
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
@@ -1531,7 +1578,7 @@ snapshots:
       tinybench: 6.1.4
       tinyexec: 1.3.0
       tinyglobby: 0.2.17
-      vite: 8.3.0(@types/node@22.20.5)
+      vite: 8.3.0(@types/node@22.20.5)(yaml@2.9.1)
       why-is-node-running: 3.2.1
     optionalDependencies:
       '@types/node': 22.20.5
@@ -1561,5 +1608,7 @@ snapshots:
       isexe: 2.0.0
 
   why-is-node-running@3.2.1: {}
+
+  yaml@2.9.1: {}
 
   zod@4.6.5: {}

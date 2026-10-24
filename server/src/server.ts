@@ -24,6 +24,7 @@ import {
 } from './util/path-completion'
 import { formatFlowValue, tryGetArrayElements } from './util/flow-value'
 import { getEmbeddedSemanticTokens, SEMANTIC_TOKEN_LEGEND } from './util/embedded-tokens'
+import { FigOptionSuggestion, FigSpecs } from './util/fig-options'
 import { uniqueBasedOnHash } from './util/array'
 import { logger, setLogConnection, setLogLevel } from './util/logger'
 import { isPositionIncludedInRange } from './util/lsp'
@@ -43,6 +44,7 @@ export default class BashServer {
   private connection: LSP.Connection
   private documents: LSP.TextDocuments<TextDocument> = new LSP.TextDocuments(TextDocument)
   private executables: Executables
+  private figSpecs = new FigSpecs()
   private linter?: Linter
   private formatter?: Formatter
   private initializationOptions?: unknown
@@ -650,22 +652,29 @@ export default class BashServer {
 
     let optionsCompletions: BashCompletionItem[] = []
     if (word?.startsWith('-')) {
-      const commandName = this.analyzer.commandNameAtPoint(
+      const commandWords = this.analyzer.commandWordsAtPoint(
         params.textDocument.uri,
         params.position.line,
         // Go one character back to get completion on the current word
         Math.max(params.position.character - 1, 0),
       )
 
-      if (commandName) {
-        optionsCompletions = getCommandOptions(commandName, word).map((option) => ({
-          label: option,
+      if (commandWords) {
+        // Prefer the bundled Fig specs, which know subcommands and describe
+        // each option; fall back to bash-completion for other commands.
+        const options: FigOptionSuggestion[] =
+          this.figSpecs.getOptions(commandWords, word) ??
+          getCommandOptions(commandWords[0], word).map((name) => ({ name }))
+
+        optionsCompletions = options.map(({ name, description }) => ({
+          label: name,
           kind: LSP.CompletionItemKind.Constant,
           data: {
             type: CompletionItemDataType.Symbol,
           },
+          ...(description && { documentation: description }),
           textEdit: {
-            newText: option.slice(word.length),
+            newText: name.slice(word.length),
             range: {
               start: {
                 character: params.position.character,

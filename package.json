@@ -4,7 +4,8 @@
   "scripts": {
     "clean": "rm -rf *.log */*.log */out node_modules vscode-client/node_modules server/node_modules",
     "preinstall": "npx only-allow pnpm",
-    "compile": "tsc -b && cp server/src/get-options.sh server/out/",
+    "compile": "tsc -b && cp server/src/get-options.sh server/out/ && pnpm extract:fig-specs",
+    "extract:fig-specs": "node scripts/extract-fig-specs.mjs server/out/fig-specs",
     "watch": "tsc -b -w",
     "lint": "oxlint --fix --deny-warnings && pnpm format",
     "lint:bail": "oxlint --deny-warnings && pnpm format:check",
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@types/node": "22.20.5",
     "@vitest/coverage-v8": "5.0.3",
+    "@withfig/autocomplete": "2.692.3",
     "cross-spawn": "7.0.6",
     "oxlint": "1.87.0",
     "oxlint-tsgolint": "7.0.2003",

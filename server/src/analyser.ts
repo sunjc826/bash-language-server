@@ -42,6 +42,13 @@ const BACKGROUND_ANALYSIS_TIMEOUT_MS = 10000
 // Upper bound on sourced files analyzed for one document's flow analysis.
 const MAX_FLOW_SOURCED_ANALYSES = 100
 
+// Named children of a command that are not part of its argument words.
+const NON_ARGUMENT_COMMAND_CHILDREN = new Set([
+  'comment',
+  'file_redirect',
+  'herestring_redirect',
+])
+
 type AnalyzedDocument = {
   document: TextDocument
   globalDeclarations: GlobalDeclarations
@@ -1203,6 +1210,41 @@ export default class Analyzer {
    * Find the name of the command at the given point.
    */
   public commandNameAtPoint(uri: string, line: number, column: number): string | null {
+    return this.commandAtPoint(uri, line, column)?.name.text.trim() ?? null
+  }
+
+  /**
+   * Find the command name and the arguments that end before the given point,
+   * excluding the word at the point.
+   */
+  public commandWordsAtPoint(uri: string, line: number, column: number): string[] | null {
+    const command = this.commandAtPoint(uri, line, column)
+    if (!command) {
+      return null
+    }
+
+    const words = [command.name.text.trim()]
+    for (const child of command.node.namedChildren) {
+      if (!child || child.startIndex <= command.name.startIndex) {
+        continue
+      }
+      const { row, column: endColumn } = child.endPosition
+      if (row > line || (row === line && endColumn > column)) {
+        break
+      }
+      if (!NON_ARGUMENT_COMMAND_CHILDREN.has(child.type)) {
+        words.push(child.text)
+      }
+    }
+
+    return words
+  }
+
+  private commandAtPoint(
+    uri: string,
+    line: number,
+    column: number,
+  ): { node: SyntaxNode; name: SyntaxNode } | null {
     let node = this.nodeAtPoint(uri, line, column)
 
     while (node && node.type !== 'command') {
@@ -1219,7 +1261,7 @@ export default class Analyzer {
       return null
     }
 
-    return firstChild.text.trim()
+    return { node, name: firstChild }
   }
 
   /**
