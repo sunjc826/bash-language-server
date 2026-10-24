@@ -252,6 +252,26 @@ diagnostics).
 - **Narrowing**: inside `if "$flag"`, `[[ -n $x ]] && ...` or `case $x in a)` branches, and after them, a variable with a few known values holds only the values that reach that point
 - **Path termination**: paths that reach `exit` or `return` (including `[[ -n $x ]] || exit`), and failing `[[ ... ]]`, `test` or `false` statements under `set -e`, do not contribute values to the code after them
 
+### BashTab Scripts
+
+With `bashIde.enableBashTabAnalysis: true`, flow analysis also models the argument parser of
+[BashTab](https://github.com/sunjc826/BashTab) commands. In an option's `case` arm,
+`bu_parse_positional $# SPEC...` followed by `bu_validate_positional` makes `${!shift_by}` hold one of
+the values the spec lists with `:value` or `--enum ... enum--`:
+
+```bash
+--vm)# GUEST
+    bu_parse_positional $# :linux :mac
+    bu_validate_positional "${!shift_by}"
+    vm=${!shift_by}   # → linux or mac
+    ;;
+```
+
+Specs that generate values at completion time (`--stdout`, `--glob`, `-c`, file specs) leave the value
+unknown. `bu_parse_error_enum` and `bu_parse_error_argn` set `is_help=true`, `bu_assert_err` stops
+the path under `set -e`, and calling a function makes `BU_RET` and `BU_RET_MAP` unknown, since BashTab
+functions return their results there.
+
 ### `# bash-ide` Directives
 
 Place these comments in your shell scripts to control flow analysis behavior:
@@ -299,6 +319,7 @@ source "$UNKNOWN"
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `bashIde.enableFlowAnalysis` | `boolean` | `false` | Enable flow-sensitive analysis, inlay hints, branch dimming, and dynamic source resolution |
+| `bashIde.enableBashTabAnalysis` | `boolean` | `false` | Model [BashTab](#bashtab-scripts) argument parsing in flow analysis |
 | `bashIde.seedVariables` | `object` | `{}` | Pre-seeded `{ VAR: value }` map for variables not in the server environment but needed for path resolution |
 | `bashIde.pathEnvInit` | `array` | `[]` | Path-based env init rules (see below) |
 

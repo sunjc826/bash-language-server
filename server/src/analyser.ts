@@ -385,6 +385,7 @@ export default class Analyzer {
       constexprErrors: [],
       topLevelUri: uri,
       referenceValues: new Map(),
+      bashTab: this.config.enableBashTabAnalysis,
     }
 
     // Environment initialization commands run in order before the script.

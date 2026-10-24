@@ -43,6 +43,11 @@
           "default": false,
           "description": "Enable flow-sensitive analysis for resolving variable values, constant branch evaluation, and dynamic source resolution. When enabled, inlay hints show resolved variable values and untaken constexpr branches are dimmed."
         },
+        "bashIde.enableBashTabAnalysis": {
+          "type": "boolean",
+          "default": false,
+          "description": "Model the argument-parsing helpers of the BashTab framework in flow analysis, so options validated against literal or enum completion specs resolve to those values. Requires bashIde.enableFlowAnalysis."
+        },
         "bashIde.constexprFunctionsEnabled": {
           "type": "boolean",
           "default": false,

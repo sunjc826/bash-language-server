@@ -754,6 +754,84 @@ describe('FlowAnalyzer', () => {
     })
   })
 
+  // ─── BashTab mode ─────────────────────────────────────────────
+
+  describe('BashTab mode', () => {
+    const parser = [
+      'set -e',
+      'FORMATS=(json table)',
+      'vm=',
+      'shift_by=',
+      'is_help=false',
+      'while (($#)); do',
+      '  bu_parse_multiselect $# "$1"',
+      '  case "$1" in',
+      '  --vm)# GUEST',
+      '    bu_parse_positional $# :linux :mac --hint "Guest"',
+      '    bu_validate_positional "${!shift_by}"',
+      '    vm=${!shift_by}',
+      '    ;;',
+      '  --mode)',
+      '    bu_parse_positional $# --enum a b enum-- -a "$COLOR"',
+      '    bu_validate_positional "${!shift_by}"',
+      '    mode=${!shift_by}',
+      '    ;;',
+      '  --out)',
+      '    bu_parse_positional $# --enum "${FORMATS[@]}" enum--',
+      '    bu_validate_positional "${!shift_by}"',
+      '    out=${!shift_by}',
+      '    ;;',
+      '  --file)',
+      '    bu_parse_positional $# --glob --enum x enum--',
+      '    bu_validate_positional "${!shift_by}"',
+      '    file=${!shift_by}',
+      '    ;;',
+      '  --raw)',
+      '    bu_parse_positional $# :x',
+      '    raw=${!shift_by}',
+      '    ;;',
+      '  -h|--help) is_help=true ;;',
+      '  *) bu_parse_error_enum "$1"; break ;;',
+      '  esac',
+      '  if "$is_help"; then break; fi',
+      '  shift "$shift_by"',
+      'done',
+      'if "$is_help"; then exit 0; fi',
+      '[[ -n "$vm" ]]',
+      'case "$vm" in',
+      'linux) ip=1 ;;',
+      'mac) ip=2 ;;',
+      '*) bu_assert_err "Unexpected guest $vm" ;;',
+      'esac',
+    ].join('\n')
+
+    it('resolves validated positional arguments to their candidates', () => {
+      const bindings = analyzeSource(parser, { bashTab: true })
+      expect(getValues(bindings, 'vm')).toEqual(['linux', 'mac'])
+      expect(getValues(bindings, 'mode')).toEqual(['a', 'b'])
+      expect(getValues(bindings, 'out')).toEqual(['json', 'table'])
+      expect(getValues(bindings, 'ip')).toEqual(['1', '2'])
+      expect(getVar(bindings, 'is_help')).toBe('false')
+    })
+
+    it('leaves open-ended or unvalidated positional arguments unknown', () => {
+      const bindings = analyzeSource(parser, { bashTab: true })
+      expect(bindings.get('file')?.kind).toBe('unknown')
+      expect(bindings.get('raw')?.kind).toBe('unknown')
+    })
+
+    it('treats BU_RET as set by the functions a command calls', () => {
+      const source = 'BU_RET=x\nbu_some_function\nr=$BU_RET'
+      expect(analyzeSource(source, { bashTab: true }).get('r')?.kind).toBe('unknown')
+      expect(getVar(analyzeSource(source), 'r')).toBe('x')
+    })
+
+    it('does not model BashTab helpers when the mode is off', () => {
+      const bindings = analyzeSource(parser)
+      expect(bindings.get('vm')?.kind).toBe('unknown')
+    })
+  })
+
   // ─── FlowValue lattice ─────────────────────────────────────────
 
   describe('FlowValue lattice (flow-value.ts)', () => {

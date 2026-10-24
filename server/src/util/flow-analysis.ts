@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import * as LSP from 'vscode-languageserver/node'
 import { Node as SyntaxNode } from 'web-tree-sitter'
 
+import { isBuiltin } from '../builtins'
 import { parseShellCheckDirective } from '../shellcheck/directive'
 import { parseBashIdeDirectives } from './bash-ide-directives'
 import { isBashBuiltinVariable } from './bash-builtin-variables'
@@ -85,6 +86,8 @@ export interface FlowAnalysisContext {
   referenceValues?: Map<string, FlowValue>
   /** Set while iterating a loop body to its fixpoint; nested loops take one pass. */
   inLoopIteration?: boolean
+  /** Model the argument-parsing helpers of the BashTab framework. */
+  bashTab?: boolean
 }
 
 /** Key of a variable_name node in FlowAnalysisContext.referenceValues. */
@@ -189,6 +192,10 @@ const STATEMENT_LIST_TYPES = new Set([
 
 /** Internal binding set to `on` while `set -e` is in effect. */
 const ERREXIT_BINDING = `${INTERNAL_BINDING_PREFIX}errexit`
+/** Internal binding: the values the current BashTab positional spec accepts. */
+const BASHTAB_SPEC_BINDING = `${INTERNAL_BINDING_PREFIX}bashtab-spec`
+/** Internal binding: the values ${!shift_by} holds after bu_validate_positional. */
+const BASHTAB_VALIDATED_BINDING = `${INTERNAL_BINDING_PREFIX}bashtab-validated`
 
 export class FlowAnalyzer {
   /**
@@ -269,8 +276,14 @@ export class FlowAnalyzer {
     }
     bindings.set('DIRSTACK', concreteArray(state.dirstack, 'command-output'))
 
-    // Path state ends with the file; shell options persist.
-    bindings.delete(UNREACHABLE_BINDING)
+    // Path and BashTab parsing state ends with the file; shell options persist.
+    for (const name of [
+      UNREACHABLE_BINDING,
+      BASHTAB_SPEC_BINDING,
+      BASHTAB_VALIDATED_BINDING,
+    ]) {
+      bindings.delete(name)
+    }
 
     return bindings
   }
@@ -861,8 +874,8 @@ export class FlowAnalyzer {
   }
 
   /**
-   * Apply a command's effect on the path: `set -e`, ending it with exit
-   * or return, and failing under `set -e`.
+   * Apply a command's effect on the path: `set -e`, BashTab's parsing
+   * helpers, ending it with exit or return, and failing under `set -e`.
    */
   private static applyCommandEffects(
     node: SyntaxNode,
@@ -874,6 +887,7 @@ export class FlowAnalyzer {
       .childrenForFieldName('argument')
       .filter((c): c is SyntaxNode => c !== null)
     if (cmdName === 'set') FlowAnalyzer.applySetOptions(args, bindings)
+    if (ctx.bashTab) FlowAnalyzer.applyBashTabCommand(cmdName, args, bindings, ctx)
 
     // exit and return end whichever path reaches them; the && / || paths
     // that reach a command in a list are analyzed separately
@@ -884,7 +898,8 @@ export class FlowAnalyzer {
         markUnreachable(bindings)
       }
     } else if (FlowAnalyzer.failureEndsPath(node, bindings)) {
-      if (cmdName === 'false') {
+      // bu_assert_err always fails; BashTab relies on set -e to stop there
+      if (cmdName === 'false' || (ctx.bashTab && cmdName === 'bu_assert_err')) {
         markUnreachable(bindings)
       } else if (cmdName === 'test' || cmdName === '[') {
         FlowAnalyzer.assertCondition(node, bindings, ctx)
@@ -908,6 +923,118 @@ export class FlowAnalyzer {
         bindings.set(ERREXIT_BINDING, concrete(enable ? 'on' : 'off'))
       }
     }
+  }
+
+  /**
+   * Model BashTab's argument-parsing helpers. In an option's case arm,
+   * `bu_parse_positional $# SPEC...` declares the values the option's next
+   * argument may take, and `bu_validate_positional` rejects any other value
+   * by setting is_help, after which the command prints help and stops. So on
+   * the path that continues, ${!shift_by} holds one of the spec's values.
+   */
+  private static applyBashTabCommand(
+    cmdName: string,
+    args: SyntaxNode[],
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+  ): void {
+    switch (cmdName) {
+      case 'bu_parse_multiselect':
+        bindings.set('shift_by', concrete('1'))
+        bindings.delete(BASHTAB_SPEC_BINDING)
+        bindings.delete(BASHTAB_VALIDATED_BINDING)
+        break
+      case 'bu_parse_positional': {
+        // shift_by grows only when an argument is left for the option
+        bindings.set('shift_by', unknown())
+        const values = FlowAnalyzer.bashTabSpecValues(args.slice(1), bindings, ctx)
+        bindings.set(
+          BASHTAB_SPEC_BINDING,
+          values
+            ? {
+                kind: 'concrete',
+                values: values.map((text) => ({ text, origin: 'assignment' as const })),
+              }
+            : unknown(),
+        )
+        bindings.delete(BASHTAB_VALIDATED_BINDING)
+        break
+      }
+      case 'bu_validate_positional': {
+        const spec = bindings.get(BASHTAB_SPEC_BINDING)
+        if (spec) bindings.set(BASHTAB_VALIDATED_BINDING, spec)
+        break
+      }
+      case 'bu_parse_error_enum':
+      case 'bu_parse_error_argn':
+        bindings.set('is_help', concrete('true'))
+        bindings.set('error_msg', unknown())
+        break
+      default:
+        // BashTab functions return their results in BU_RET / BU_RET_MAP
+        if (!isBuiltin(cmdName)) {
+          bindings.set('BU_RET', unknown())
+          bindings.set('BU_RET_MAP', unknown())
+        }
+    }
+  }
+
+  /**
+   * The values a BashTab completion spec accepts, or null when it may accept
+   * values that are not known statically. `:word` and `--enum ... enum--`
+   * list values; `--hint`, `-a`/`--ansi`, `--cwd`, `+a` and `+c` only
+   * change how they are shown; anything else (`--stdout`, `--glob`, `-c`,
+   * file or user-defined specs) generates values at completion time.
+   */
+  private static bashTabSpecValues(
+    specArgs: SyntaxNode[],
+    bindings: FlowBindings,
+    ctx: FlowAnalysisContext,
+  ): string[] | null {
+    const quietCtx: FlowAnalysisContext = {
+      ...ctx,
+      trackInlayHints: false,
+      referenceValues: undefined,
+    }
+    // Each argument's words; null stands for one word that is not known
+    const words: (string | null)[] = []
+    for (const arg of specArgs) {
+      const text = TreeSitterUtil.resolveStaticString(arg)
+      if (text !== null) {
+        words.push(text)
+        continue
+      }
+      const result = FlowAnalyzer.evaluateExpression(arg, bindings, quietCtx)
+      const value = result.success && result.value ? result.value : null
+      const elements = value ? tryGetArrayElements(value) : null
+      if (elements) {
+        words.push(...elements)
+      } else if (arg.type === 'string' && !/\[[@*]\]/.test(arg.text)) {
+        words.push(value ? tryGetSingleValue(value) : null)
+      } else {
+        return null
+      }
+    }
+
+    const values: string[] = []
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i]
+      if (word === null) return null
+      if (word.startsWith(':')) {
+        values.push(word.slice(1))
+      } else if (['--hint', '-a', '--ansi', '--cwd'].includes(word)) {
+        i++
+      } else if (word === '--enum') {
+        const end = words.indexOf('enum--', i + 1)
+        const enumWords = end < 0 ? [null] : words.slice(i + 1, end)
+        if (enumWords.some((w) => w === null)) return null
+        values.push(...(enumWords as string[]))
+        i = end
+      } else if (!['+a', '--no-ansi', '+c', '--no-append-cur-word'].includes(word)) {
+        return null
+      }
+    }
+    return values.length > 0 ? [...new Set(values)] : null
   }
 
   /**
@@ -3316,6 +3443,12 @@ export class FlowAnalyzer {
     // (${!arr[@]}, ${!prefix*}, ${!name:-word}) are not resolved.
     const operators = node.childrenForFieldName('operator')
     if (operators[0]?.type === '!') {
+      // In BashTab mode, ${!shift_by} after bu_validate_positional holds a
+      // value the option's spec accepts
+      const validated = bindings.get(BASHTAB_VALIDATED_BINDING)
+      if (ctx.bashTab && varName === 'shift_by' && operators.length === 1 && validated) {
+        return { success: true, value: validated }
+      }
       const target =
         binding && operators.length === 1 && !subscriptNode
           ? tryGetSingleValue(binding)
