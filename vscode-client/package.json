@@ -195,7 +195,7 @@
             "properties": {
               "path": {
                 "type": "string",
-                "description": "Glob pattern to match file paths. Use (*) for capture groups referenced as $1, $2, etc."
+                "description": "Glob pattern to match file paths, relative to the workspace folder unless absolute. Use (*) to capture one path segment, referenced as $1, $2, etc."
               },
               "envInit": {
                 "type": "string",

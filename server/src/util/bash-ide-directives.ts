@@ -119,20 +119,3 @@ export function parseBashIdeDirectives(fileContent: string): {
 
   return { directives, envInitBlocks }
 }
-
-/**
- * Extract variable assignments from a command string.
- * Matches patterns like `VAR=value`, `export VAR=value`, etc.
- */
-export function extractVariableAssignments(command: string): Map<string, string> {
-  const assignments = new Map<string, string>()
-
-  // Match VAR=value (possibly quoted)
-  const assignmentRegex = /(?:^|\s+)(?:export\s+)?(\w+)=(["']?)([^"'\s]*)\2(?:\s+|$)/g
-  let match: RegExpExecArray | null
-  while ((match = assignmentRegex.exec(command)) !== null) {
-    assignments.set(match[1], match[3])
-  }
-
-  return assignments
-}

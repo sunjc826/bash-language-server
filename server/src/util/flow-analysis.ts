@@ -49,10 +49,15 @@ export interface FlowAnalysisContext {
   sourcePushd: boolean
   /** Callback to resolve a sourced file. */
   resolveSource: (sourcePath: string, fromUri: string) => string | null
-  /** Callback to analyze a sourced file and return its exported bindings.
+  /** Callback to analyze a sourced file and return the bindings after sourcing it.
    * @param uri The URI of the sourced file.
-   * @param currentPwd The PWD at the time of the source command (flow-tracked). */
-  analyzeSourcedFile: (uri: string, currentPwd?: string) => FlowBindings
+   * @param currentPwd The PWD at the time of the source command (flow-tracked).
+   * @param callerBindings The bindings at the time of the source command. */
+  analyzeSourcedFile: (
+    uri: string,
+    currentPwd?: string,
+    callerBindings?: FlowBindings,
+  ) => FlowBindings
   /** Whether to track inlay hint ranges. */
   trackInlayHints: boolean
   /** Accumulated inlay hints for this file. */
@@ -1098,16 +1103,15 @@ export class FlowAnalyzer {
       // Allow the context to resolve further
       const finalUri = ctx.resolveSource(resolvedUri, ctx.uri)
       if (finalUri) {
-        // Merge sourced file bindings
-        const sourcedBindings = ctx.analyzeSourcedFile(finalUri, state.pwd)
+        // The sourced file runs in this shell, so its assignments
+        // (including cd) replace the current values.
+        const sourcedBindings = ctx.analyzeSourcedFile(finalUri, state.pwd, bindings)
         for (const [key, value] of sourcedBindings) {
-          const existing = bindings.get(key)
-          if (existing) {
-            bindings.set(key, join(existing, value))
-          } else {
-            bindings.set(key, value)
-          }
+          bindings.set(key, value)
         }
+        const pwd = sourcedBindings.get('PWD')
+        const pwdValue = pwd ? tryGetSingleValue(pwd) : null
+        if (pwdValue) state.pwd = pwdValue
       }
     }
   }
@@ -1184,10 +1188,12 @@ export class FlowAnalyzer {
               }
             }
 
-            // Merge bindings from the declared source file
-            const sourcedBindings = ctx.analyzeSourcedFile(finalUri, state.pwd)
+            // Merge bindings from the declared source file, which may not
+            // run at this point
+            const sourcedBindings = ctx.analyzeSourcedFile(finalUri, state.pwd, bindings)
             for (const [key, value] of sourcedBindings) {
               const existing = bindings.get(key)
+              if (existing === value) continue
               if (existing) {
                 bindings.set(key, join(existing, value))
               } else {

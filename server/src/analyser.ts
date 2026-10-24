@@ -26,17 +26,20 @@ import {
   FlowAnalysisOptions,
   InlayHint,
 } from './util/flow-analysis'
-import { FlowBindings } from './util/flow-value'
+import { concrete, FlowBindings } from './util/flow-value'
 import { getFilePaths } from './util/fs'
 import { getInputVariableDeclaration, variableNameRange } from './util/input-declarations'
 import { logger } from './util/logger'
 import { isPositionIncludedInRange } from './util/lsp'
+import { expandPathEnvInitCaptures, matchPathEnvInitPattern } from './util/path-env-init'
 import { analyzeFile } from './util/shebang'
 import * as sourcing from './util/sourcing'
 import * as TreeSitterUtil from './util/tree-sitter'
 import { Config } from './config'
 
 const BACKGROUND_ANALYSIS_TIMEOUT_MS = 10000
+// Upper bound on sourced files analyzed for one document's flow analysis.
+const MAX_FLOW_SOURCED_ANALYSES = 100
 
 type AnalyzedDocument = {
   document: TextDocument
@@ -69,8 +72,6 @@ export default class Analyzer {
   private parser: Parser
   private uriToAnalyzedDocument: Record<string, AnalyzedDocument | undefined> = {}
   private workspaceFolder: string | null
-  /** Cached flow analysis results for sourced files. */
-  private uriToFlowBindings: Map<string, FlowBindings> = new Map()
   /** Tracks dynamically-resolved sourced URIs discovered during flow analysis (per source file). */
   private uriToFlowSourcedUris: Map<string, Set<string>> = new Map()
   /** Long-lived constexpr evaluator (and its cache) shared across analyses. */
@@ -256,95 +257,111 @@ export default class Analyzer {
     if (!this.config) return
 
     const { pathEnvInit, seedVariables } = this.config
+    const filePath = uriToPath(uri)
 
     // Track dynamically-resolved sourced URIs for this file
     const resolvedSourcedUris = new Set<string>()
     this.uriToFlowSourcedUris.set(uri, resolvedSourcedUris)
 
-    // Determine CWD for this file
-    let cwd = path.dirname(uri.replace('file://', ''))
-
-    // Parse bash-ide directives
     const bashIde = parseBashIdeDirectives(fileContent)
+    let cwd = path.dirname(filePath)
     const cwdDirective = bashIde.directives.find((d) => d.type === 'cwd')
     if (cwdDirective?.value) {
-      cwd = cwdDirective.value
-      if (!path.isAbsolute(cwd)) {
-        cwd = path.resolve(path.dirname(uri.replace('file://', '')), cwd)
-      }
+      cwd = path.resolve(path.dirname(filePath), cwdDirective.value)
     }
 
-    const sourcePushd = bashIde.directives.some((d) => d.type === 'source-pushd')
-
-    // Check pathEnvInit rules
-    const filePath = uri.replace('file://', '')
-    for (const rule of pathEnvInit) {
-      const globRegex = new RegExp(
-        `^${rule.path.replace(/\./g, '\\.').replace(/\*/g, '(.*)')}$`,
-      )
-      const match = filePath.match(globRegex)
-      if (match) {
-        if (rule.sourcePushd) {
-          // sourcePushd-only rule applies additively
-        }
-      }
-    }
-
-    // Build initial bindings from seedVariables
-    const initialBindings: FlowBindings = new Map()
-    for (const [varName, value] of Object.entries(seedVariables)) {
-      initialBindings.set(varName, {
-        kind: 'concrete' as const,
-        values: [{ text: value, origin: 'seed' as const }],
+    const workspaceFolder = this.workspaceFolder?.startsWith('file://')
+      ? uriToPath(this.workspaceFolder)
+      : this.workspaceFolder
+    const matchingRules = pathEnvInit.flatMap((rule) => {
+      const captures = matchPathEnvInitPattern({
+        filePath,
+        pattern: rule.path,
+        workspaceFolder,
       })
-    }
+      return captures ? [{ rule, captures }] : []
+    })
 
-    // Handle env-init directives
-    const envInit = bashIde.directives.find((d) => d.type === 'env-init')
-    if (envInit?.value) {
-      // Process the env-init command
-      const assignments = this.extractAssignmentsFromEnvInit(envInit.value)
-      for (const [varName, value] of assignments) {
-        initialBindings.set(varName, {
-          kind: 'concrete' as const,
-          values: [{ text: value, origin: 'env-init' as const }],
-        })
+    const sourcePushd =
+      bashIde.directives.some((d) => d.type === 'source-pushd') ||
+      matchingRules.some(({ rule }) => rule.sourcePushd)
+
+    let initialBindings: FlowBindings = new Map()
+    for (const [varName, value] of Object.entries(seedVariables)) {
+      initialBindings.set(varName, concrete(value, 'seed'))
+    }
+    for (const { rule, captures } of matchingRules) {
+      for (const [varName, template] of Object.entries(rule.variables ?? {})) {
+        initialBindings.set(
+          varName,
+          concrete(expandPathEnvInitCaptures(template, captures), 'seed'),
+        )
       }
     }
 
-    // Handle env-init blocks
-    for (const block of bashIde.envInitBlocks) {
-      for (const cmd of block.commands) {
-        const assignments = this.extractAssignmentsFromEnvInit(cmd)
-        for (const [varName, value] of assignments) {
-          initialBindings.set(varName, {
-            kind: 'concrete' as const,
-            values: [{ text: value, origin: 'env-init' as const }],
-          })
-        }
-      }
-    }
+    const constexprOptions = this.buildConstexprFlowOptions()
+    // Each sourced file is analyzed in the context of its caller, so results
+    // are not cached across source commands. Cycles and the overall amount of
+    // sourced work are bounded per top-level analysis.
+    const activeUris = new Set<string>([uri])
+    let sourcedAnalysesRemaining = MAX_FLOW_SOURCED_ANALYSES
 
-    // Apply pathEnvInit rules
-    for (const rule of pathEnvInit) {
-      const globRegex = new RegExp(
-        `^${rule.path.replace(/\./g, '\\.').replace(/\*/g, '(.*)')}$`,
-      )
-      const match = filePath.match(globRegex)
-      if (match) {
-        // Seed variables with capture group expansion
-        if (rule.variables) {
-          for (const [varName, valueTemplate] of Object.entries(rule.variables)) {
-            const expanded = valueTemplate.replace(
-              /\$(\d+)/g,
-              (_, n) => match[parseInt(n)] || '',
-            )
-            initialBindings.set(varName, {
-              kind: 'concrete' as const,
-              values: [{ text: expanded, origin: 'seed' as const }],
-            })
-          }
+    const analyzeSourcedFile = (
+      sourcedUri: string,
+      currentPwd?: string,
+      callerBindings: FlowBindings = new Map(),
+    ): FlowBindings => {
+      resolvedSourcedUris.add(sourcedUri)
+      if (activeUris.has(sourcedUri) || sourcedAnalysesRemaining <= 0) return new Map()
+      sourcedAnalysesRemaining--
+
+      let sourcedTree: Tree | null = null
+      activeUris.add(sourcedUri)
+      try {
+        const sourcedPath = uriToPath(sourcedUri)
+        const content = this.getFlowSourceContent(sourcedUri)
+        if (content === null) return new Map()
+        sourcedTree = this.parser.parse(content)
+        if (!sourcedTree) return new Map()
+
+        // A sourced file runs in the caller's shell: it sees the caller's
+        // variables and PWD, unless sourcePushd treats its own directory as PWD.
+        const sourcedBindings = new Map(callerBindings)
+        sourcedBindings.delete('BASH_SOURCE')
+        if (sourcePushd) sourcedBindings.delete('PWD')
+
+        const result = FlowAnalyzer.analyzeFile(
+          {
+            ...ctx,
+            uri: sourcedUri,
+            content,
+            rootNode: sourcedTree.rootNode,
+            cwd: sourcePushd ? path.dirname(sourcedPath) : currentPwd || ctx.cwd,
+            initialBindings: sourcedBindings,
+            trackInlayHints: false,
+            inlayHints: [],
+            dimmedRanges: [],
+            sourceErrors: [],
+            constexprErrors: [],
+          },
+          constexprOptions,
+        )
+
+        for (const name of ['BASH_SOURCE', ...(sourcePushd ? ['PWD'] : [])]) {
+          const callerValue = callerBindings.get(name)
+          if (callerValue) result.set(name, callerValue)
+          else result.delete(name)
         }
+        return result
+      } catch (error) {
+        logger.warn(
+          `Flow analysis failed for sourced file ${sourcedUri}: ${String(error)}`,
+        )
+        return new Map()
+      } finally {
+        activeUris.delete(sourcedUri)
+        // Bindings hold strings and LSP locations only, never syntax nodes.
+        sourcedTree?.delete()
       }
     }
 
@@ -355,58 +372,8 @@ export default class Analyzer {
       cwd,
       initialBindings,
       sourcePushd,
-      resolveSource: (sourcePath: string, fromUri: string) => {
-        // Resolve source paths using the analyzer
-        return sourcePath
-      },
-      analyzeSourcedFile: (sourcedUri: string, currentPwd?: string): FlowBindings => {
-        let sourcedTree: Tree | null = null
-        // Track this dynamically-resolved sourced URI
-        resolvedSourcedUris.add(sourcedUri)
-
-        // Check cache first
-        const cached = this.uriToFlowBindings.get(sourcedUri)
-        if (cached) return cached
-
-        // Try to load and analyze the sourced file
-        try {
-          const filePath = sourcedUri.replace('file://', '')
-          if (!fs.existsSync(filePath)) return new Map()
-
-          const content = fs.readFileSync(filePath, 'utf8')
-          sourcedTree = this.parser.parse(content)
-          if (!sourcedTree) return new Map()
-
-          // Determine the initial CWD for the sourced file.
-          // When sourcePushd is true, bash sets the sourced file's context
-          // to its own directory. Otherwise, the sourced file inherits the
-          // caller's PWD at the time of the source command — use currentPwd
-          // (flow-tracked) if available, falling back to ctx.cwd.
-          const sourcedCwd = sourcePushd ? path.dirname(filePath) : currentPwd || ctx.cwd
-
-          const sourcedCtx: FlowAnalysisContext = {
-            ...ctx,
-            uri: sourcedUri,
-            content,
-            rootNode: sourcedTree.rootNode,
-            cwd: sourcedCwd,
-            inlayHints: [],
-            dimmedRanges: [],
-            sourceErrors: [],
-            constexprErrors: [],
-          }
-
-          // Run flow analysis on the sourced file recursively
-          const sourcedBindings = FlowAnalyzer.analyzeFile(sourcedCtx)
-          this.uriToFlowBindings.set(sourcedUri, sourcedBindings)
-          return sourcedBindings
-        } catch {
-          return new Map()
-        } finally {
-          // Bindings hold strings and LSP locations only, never syntax nodes.
-          sourcedTree?.delete()
-        }
-      },
+      resolveSource: (sourcePath: string) => sourcePath,
+      analyzeSourcedFile,
       trackInlayHints: true,
       inlayHints: [],
       dimmedRanges: [],
@@ -415,18 +382,69 @@ export default class Analyzer {
       topLevelUri: uri,
     }
 
-    // Run the flow analysis
-    const flowBindings = FlowAnalyzer.analyzeFile(ctx, this.buildConstexprFlowOptions())
+    // Environment initialization commands run in order before the script.
+    const envInitCommands = [
+      ...matchingRules.flatMap(({ rule, captures }) =>
+        rule.envInit ? [expandPathEnvInitCaptures(rule.envInit, captures)] : [],
+      ),
+      ...bashIde.directives.flatMap((d) =>
+        d.type === 'env-init' && d.value ? [d.value] : [],
+      ),
+      ...bashIde.envInitBlocks.map((block) => block.commands.join('\n')),
+    ]
+    for (const command of envInitCommands) {
+      initialBindings = this.runFlowEnvInit(command, { ...ctx, initialBindings })
+    }
+    ctx.initialBindings = initialBindings
 
-    // Store results
+    const flowBindings = FlowAnalyzer.analyzeFile(ctx, constexprOptions)
+
     analyzedDoc.flowBindings = flowBindings
     analyzedDoc.inlayHints = ctx.inlayHints
     analyzedDoc.dimmedRanges = ctx.dimmedRanges
     analyzedDoc.sourceErrors = ctx.sourceErrors
     analyzedDoc.constexprErrors = ctx.constexprErrors
+  }
 
-    // Also cache
-    this.uriToFlowBindings.set(uri, flowBindings)
+  /**
+   * Analyze an environment initialization command (e.g. `source env.sh` or
+   * `export A=1`) and return the bindings it leaves for the script.
+   */
+  private runFlowEnvInit(command: string, ctx: FlowAnalysisContext): FlowBindings {
+    const tree = this.parser.parse(command)
+    if (!tree) return ctx.initialBindings
+    try {
+      const bindings = FlowAnalyzer.analyzeFile({
+        ...ctx,
+        content: command,
+        rootNode: tree.rootNode,
+        trackInlayHints: false,
+        inlayHints: [],
+        dimmedRanges: [],
+        sourceErrors: [],
+        constexprErrors: [],
+      })
+      // Let the script's own analysis seed its shell state.
+      for (const name of ['BASH_SOURCE', 'DIRSTACK', 'FUNCNAME', 'OLDPWD', 'PWD']) {
+        bindings.delete(name)
+      }
+      return bindings
+    } finally {
+      tree.delete()
+    }
+  }
+
+  /** Prefer the editor's contents for open documents over the file on disk. */
+  private getFlowSourceContent(uri: string): string | null {
+    const document = this.backgroundAnalyzedUris.has(uri)
+      ? undefined
+      : this.uriToAnalyzedDocument[uri]?.document
+    if (document) return document.getText()
+    try {
+      return fs.readFileSync(uriToPath(uri), 'utf8')
+    } catch {
+      return null
+    }
   }
 
   /**
@@ -449,22 +467,6 @@ export default class Analyzer {
         },
       },
     }
-  }
-
-  /**
-   * Extract variable assignments from an env-init command string.
-   */
-  private extractAssignmentsFromEnvInit(command: string): Map<string, string> {
-    const assignments = new Map<string, string>()
-
-    // Match VAR=value (possibly quoted)
-    const assignmentRegex = /(?:^|\s+)(?:export\s+)?(\w+)=(["']?)([^"'\s]*)\2(?:\s+|$)/g
-    let match: RegExpExecArray | null
-    while ((match = assignmentRegex.exec(command)) !== null) {
-      assignments.set(match[1], match[3])
-    }
-
-    return assignments
   }
 
   /**
@@ -1605,3 +1607,6 @@ export default class Analyzer {
     return rootNode.descendantForPosition(start, end)
   }
 }
+
+const uriToPath = (uri: string): string =>
+  uri.startsWith('file://') ? url.fileURLToPath(uri) : uri

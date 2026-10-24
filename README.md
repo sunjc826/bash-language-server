@@ -302,8 +302,11 @@ source "$UNKNOWN"
 
 #### `pathEnvInit` Rules
 
-An array of rules triggered when a file path matches a glob pattern. `(*)` in the pattern creates
-capture groups referenced as `$1`, `$2`, etc. in `variables` and `envInit`:
+An array of rules triggered when a file path matches a glob pattern. Relative patterns are matched
+against the path relative to the workspace folder. `*` and `?` match within one path segment, `**`
+matches any number of segments, and `(*)` captures one segment, referenced as `$1`, `$2`, etc. in
+`variables` and `envInit`. Rules apply in order, and their `envInit` commands run before the
+file's own `# bash-ide env-init` directives:
 
 ```jsonc
 {
