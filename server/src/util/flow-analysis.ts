@@ -887,6 +887,7 @@ export class FlowAnalyzer {
       .childrenForFieldName('argument')
       .filter((c): c is SyntaxNode => c !== null)
     if (cmdName === 'set') FlowAnalyzer.applySetOptions(args, bindings)
+    if (cmdName === 'shift') FlowAnalyzer.forgetPositionalParameters(bindings)
     if (ctx.bashTab) FlowAnalyzer.applyBashTabCommand(cmdName, args, bindings, ctx)
 
     // exit and return end whichever path reaches them; the && / || paths
@@ -907,12 +908,18 @@ export class FlowAnalyzer {
     }
   }
 
-  /** Track `set -e` / `set -o errexit` and their `+` forms. */
+  /**
+   * Track `set -e` / `set -o errexit` and their `+` forms, and forget the
+   * positional parameters when `set` replaces them.
+   */
   private static applySetOptions(args: SyntaxNode[], bindings: FlowBindings): void {
     const words = args.map((arg) => TreeSitterUtil.resolveStaticString(arg))
     for (let i = 0; i < words.length; i++) {
       const word = words[i]
-      if (word === null || word === '-' || word === '--') break
+      if (word === null || word === '-' || word === '--' || !/^[-+]/.test(word)) {
+        FlowAnalyzer.forgetPositionalParameters(bindings)
+        break
+      }
       const enable = word.startsWith('-')
       if ((word === '-o' || word === '+o') && words[i + 1] !== undefined) {
         if (words[i + 1] === 'errexit') {
@@ -922,6 +929,13 @@ export class FlowAnalyzer {
       } else if (/^[-+][A-Za-z]+$/.test(word) && word.includes('e')) {
         bindings.set(ERREXIT_BINDING, concrete(enable ? 'on' : 'off'))
       }
+    }
+  }
+
+  /** Drop known values of $1, $2, ... after shift or `set --` changes them. */
+  private static forgetPositionalParameters(bindings: FlowBindings): void {
+    for (const name of bindings.keys()) {
+      if (/^[1-9][0-9]*$/.test(name)) bindings.delete(name)
     }
   }
 
@@ -1874,15 +1888,35 @@ export class FlowAnalyzer {
     }
 
     // Unknown value: any item may run, each from the state before the case.
-    // Without a catch-all pattern, no item may run at all.
+    // Without a catch-all pattern, no item may run at all. An item whose
+    // patterns are all literal runs with the subject equal to one of them.
     const before = new Map(bindings)
     const outcomes: FlowBindings[] = []
     let hasCatchAll = false
     for (const { patterns, body } of items) {
       if (patterns.some((p) => p.text.trim() === '*')) hasCatchAll = true
       const branch = new Map(before)
+      const literals = patterns.map((p) => FlowAnalyzer.literalCasePattern(p))
+      const narrowed: FlowValue | null =
+        subjectName && literals.length > 0 && literals.every((l) => l !== null)
+          ? {
+              kind: 'concrete',
+              values: (literals as string[]).map((text) => ({
+                text,
+                origin: 'assignment' as const,
+              })),
+            }
+          : null
+      if (subjectName && narrowed) branch.set(subjectName, narrowed)
       for (const bodyNode of body) {
         FlowAnalyzer.analyzeNode(bodyNode, branch, ctx, state)
+      }
+      // The match says nothing about the subject after the case, so do not
+      // let the narrowed value replace what other paths know about it.
+      if (subjectName && narrowed && flowValuesEqual(branch.get(subjectName), narrowed)) {
+        const original = before.get(subjectName)
+        if (original) branch.set(subjectName, original)
+        else branch.delete(subjectName)
       }
       outcomes.push(branch)
     }
@@ -1905,6 +1939,20 @@ export class FlowAnalyzer {
     if (word.childrenForFieldName('operator').length > 0) return null
     const [nameNode, ...rest] = word.namedChildren
     return nameNode?.type === 'variable_name' && rest.length === 0 ? nameNode.text : null
+  }
+
+  /**
+   * The only string a case pattern matches when it has no glob or extglob
+   * syntax: `--dry-run`, `"a b"` or `'*'`, but not `--v*` or `@(a|b)`.
+   */
+  private static literalCasePattern(pattern: SyntaxNode): string | null {
+    if (pattern.type === 'word' || pattern.type === 'extglob_pattern') {
+      return /[*?[\]\\|()$`'"]/.test(pattern.text) ? null : pattern.text
+    }
+    if (pattern.type === 'string' || pattern.type === 'raw_string') {
+      return TreeSitterUtil.resolveStaticString(pattern)
+    }
+    return null
   }
 
   /**

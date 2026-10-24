@@ -777,6 +777,46 @@ describe('FlowAnalyzer', () => {
       expect(bindings.has('c')).toBe(false)
       expect(ctx.dimmedRanges.map((r) => r.start.line)).toEqual([4])
     })
+
+    it('narrows an unknown subject to the literal patterns of the case item', () => {
+      const bindings = analyzeSource(
+        [
+          'opt_dry_run=()',
+          'while (($#)); do',
+          '  case "$1" in',
+          '  --dry-run)# _FLAG',
+          '    opt_dry_run=("$1")',
+          '    ;;',
+          '  -h|--help|"-?") help=$1 ;;',
+          '  --v*) verbose=$1 ;;',
+          '  esac',
+          '  shift',
+          'done',
+        ].join('\n'),
+      )
+      const values = bindings.get('opt_dry_run')
+      expect(values?.kind === 'concrete' && values.values.map((v) => v.elements)).toEqual(
+        [[], ['--dry-run']],
+      )
+      expect(getValues(bindings, 'help')).toEqual(['--help', '-?', '-h'])
+      expect(getValues(bindings, 'verbose')).not.toContain('--v*')
+    })
+
+    it('does not keep the narrowed subject after shift or past esac', () => {
+      const bindings = analyzeSource(
+        [
+          'case "$1" in',
+          '--out) shift; out=$1 ;;',
+          '--set) set -- x; first=$1 ;;',
+          '--keep) ;;',
+          'esac',
+          'after=$1',
+        ].join('\n'),
+      )
+      expect(getValues(bindings, 'out')).not.toContain('--out')
+      expect(getValues(bindings, 'first')).not.toContain('--set')
+      expect(getValues(bindings, 'after')).not.toContain('--keep')
+    })
   })
 
   // ─── BashTab mode ─────────────────────────────────────────────
