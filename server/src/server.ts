@@ -22,6 +22,7 @@ import {
   isFilePathContext,
   resolveConcatenationPath,
 } from './util/path-completion'
+import { paramName, paramNotes } from './util/doc-comments'
 import { formatFlowValue, tryGetArrayElements } from './util/flow-value'
 import { getEmbeddedSemanticTokens, SEMANTIC_TOKEN_LEGEND } from './util/embedded-tokens'
 import { FigCommand, FigOptionSuggestion, FigSpecs } from './util/fig-options'
@@ -1058,6 +1059,9 @@ export default class BashServer {
     )
     if (!argument) return null
 
+    const functionArgument = this.getFunctionArgumentDocumentation(params, argument)
+    if (functionArgument !== undefined) return functionArgument
+
     const { words, index } = argument
     const helpSpec = await this.getHelpSpec(words[0])
     const description =
@@ -1086,6 +1090,58 @@ export default class BashServer {
         break
     }
     return description.description ? `${label}\n\n${description.description}` : label
+  }
+
+  /**
+   * Describe the parameter an argument fills when the command is a function
+   * with a known signature. Undefined when it is not such a function, and
+   * null when earlier arguments may expand to any number of words.
+   */
+  private getFunctionArgumentDocumentation(
+    params: LSP.TextDocumentPositionParams,
+    {
+      words,
+      index,
+      isPositionKnown,
+    }: { words: string[]; index: number; isPositionKnown: boolean },
+  ): string | null | undefined {
+    const currentUri = params.textDocument.uri
+    const functions = deduplicateSymbols({
+      symbols: this.analyzer
+        .findDeclarationsMatchingWord({
+          exactMatch: true,
+          uri: currentUri,
+          word: words[0],
+          position: params.position,
+        })
+        .filter((symbol) => symbol.kind === LSP.SymbolKind.Function),
+      currentUri,
+    })
+    if (functions.length !== 1) return undefined
+    const { location } = functions[0]
+    const signature = this.analyzer.getFunctionSignature(
+      location.uri,
+      location.range.start.line,
+    )
+    if (signature?.name !== words[0]) return undefined
+    if (!isPositionKnown) return null
+
+    const positional = signature.params.filter((param) => !param.rest)
+    const param =
+      index <= positional.length
+        ? positional[index - 1]
+        : signature.params.find((p) => p.rest)
+    if (!param) {
+      const count = positional.length
+      return `Extra argument: \`${signature.name}\` takes ${
+        count === 0 ? 'no arguments' : count === 1 ? '1 argument' : `${count} arguments`
+      }`
+    }
+    const notes = paramNotes(param)
+    const label = `Argument ${paramName(param)} of \`${signature.name}\`${
+      notes ? ` (${notes})` : ''
+    }`
+    return param.description ? `${label}\n\n${param.description}` : label
   }
 
   /**

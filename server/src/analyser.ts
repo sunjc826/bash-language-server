@@ -12,6 +12,12 @@ import { flattenArray } from './util/array'
 import { parseBashIdeDirectives } from './util/bash-ide-directives'
 import { ConstexprEvaluator } from './util/constexpr-evaluator'
 import {
+  commentLinesAbove,
+  parseDocComment,
+  renderDocComment,
+  renderSynopsis,
+} from './util/doc-comments'
+import {
   FindDeclarationParams,
   findDeclarationUsingGlobalSemantics,
   findDeclarationUsingLocalSemantics,
@@ -29,6 +35,7 @@ import {
 } from './util/flow-analysis'
 import { concrete, FlowBindings, FlowValue } from './util/flow-value'
 import { getFilePaths } from './util/fs'
+import { FunctionSignature, getFunctionSignatures } from './util/function-signature'
 import { getInputVariableDeclaration, variableNameRange } from './util/input-declarations'
 import { logger } from './util/logger'
 import { isPositionIncludedInRange } from './util/lsp'
@@ -59,6 +66,28 @@ const EXPANSION_TYPES: ReadonlySet<string> = new Set([
   'process_substitution',
 ])
 
+/**
+ * Whether an argument always expands to exactly one word: nothing unquoted
+ * is subject to word splitting, globbing or brace expansion, and nothing
+ * quoted expands every element, as "$@" and "${array[@]}" do.
+ */
+function isSingleWord(node: SyntaxNode): boolean {
+  switch (node.type) {
+    case 'raw_string':
+    case 'ansi_c_string':
+    case 'number':
+      return true
+    case 'word':
+      return !/[*?[{]/.test(node.text)
+    case 'string':
+      return !/\$@|\$\{@|\[@\]|\$\{![^}]*@\}/.test(node.text)
+    case 'concatenation':
+      return node.namedChildren.every((child) => !!child && isSingleWord(child))
+    default:
+      return false
+  }
+}
+
 // Named children of a command that are not part of its argument words.
 const NON_ARGUMENT_COMMAND_CHILDREN = new Set([
   'comment',
@@ -84,6 +113,8 @@ type AnalyzedDocument = {
   sourceErrors?: Array<{ range: LSP.Range; path: string }>
   /** Orphaned `# bash-ide constexpr` directive ranges (for error diagnostics). */
   constexprErrors?: LSP.Range[]
+  /** Signatures of the functions defined in the file, by definition line. */
+  functionSignatures?: Map<number, FunctionSignature>
 }
 
 /**
@@ -184,6 +215,7 @@ export default class Analyzer {
 
     let globalDeclarations: GlobalDeclarations
     let sourceCommands: sourcing.SourceCommand[]
+    let functionSignatures: Map<number, FunctionSignature>
     try {
       globalDeclarations = getGlobalDeclarations({ tree, uri })
       sourceCommands = sourcing.getSourceCommands({
@@ -191,6 +223,12 @@ export default class Analyzer {
         rootPath: this.workspaceFolder,
         tree,
       })
+      const signatureAnalysis = getFunctionSignatures(
+        tree.rootNode,
+        fileContent.split('\n'),
+      )
+      functionSignatures = signatureAnalysis.signatures
+      diagnostics.push(...signatureAnalysis.diagnostics)
     } catch (error) {
       tree.delete()
       throw error
@@ -208,6 +246,7 @@ export default class Analyzer {
       sourcedUris,
       sourceCommands: sourceCommands.filter((sourceCommand) => !sourceCommand.error),
       tree,
+      functionSignatures,
     }
     if (background) this.backgroundAnalyzedUris.add(uri)
 
@@ -1263,13 +1302,16 @@ export default class Analyzer {
    * Find all words of the command at the given point, starting with its
    * name, and the index of the argument word that contains the point. Null
    * when the point is not on an argument, such as on the name or a redirect,
-   * or the argument contains an expansion.
+   * or the argument contains an expansion. `isPositionKnown` is false when an
+   * earlier argument may expand to more or fewer than one word, such as
+   * `"$@"`, an unquoted `$var` or a glob, so the index may not be the
+   * argument's position at run time.
    */
   public commandArgumentAtPoint(
     uri: string,
     line: number,
     column: number,
-  ): { words: string[]; index: number } | null {
+  ): { words: string[]; index: number; isPositionKnown: boolean } | null {
     const command = this.commandAtPoint(uri, line, column, OPTION_COMMAND_TYPES)
     if (!command) {
       return null
@@ -1280,6 +1322,7 @@ export default class Analyzer {
     const point = { row: line, column }
     const words = [command.name.text.trim()]
     let index = -1
+    let isPositionKnown = true
     for (const child of command.node.namedChildren) {
       if (
         !child ||
@@ -1293,10 +1336,11 @@ export default class Analyzer {
         if (child.descendantsOfType([...EXPANSION_TYPES]).length > 0) return null
         index = words.length
       }
+      if (index < 0 && !isSingleWord(child)) isPositionKnown = false
       words.push(child.text)
     }
 
-    return index > 0 ? { words, index } : null
+    return index > 0 ? { words, index, isPositionKnown } : null
   }
 
   private commandAtPoint(
@@ -1327,56 +1371,36 @@ export default class Analyzer {
 
   /**
    * Find a block of comments above a line position, as Markdown without the
-   * leading `#` of each line.
+   * leading `#` of each line. A block with doc tags is rendered by section,
+   * and a function with a known signature gets a synopsis.
    */
   public commentsAbove(uri: string, line: number): string | null {
-    const doc = this.uriToAnalyzedDocument[uri]?.document
-    if (!doc) {
+    const analyzedDoc = this.uriToAnalyzedDocument[uri]
+    if (!analyzedDoc) {
       return null
     }
 
-    const commentBlock = []
-
-    // start from the line above
-    let commentBlockIndex = line - 1
-
-    // will return the comment string without the comment '#'
-    // and without leading whitespace, or null if the line 'l'
-    // is not a comment line
-    const getComment = (l: string): null | string => {
-      // this regexp has to be defined within the function
-      const commentRegExp = /^\s*#\s?(.*)/g
-      const matches = commentRegExp.exec(l)
-      return matches ? matches[1].trimRight() : null
-    }
-
-    let currentLine = doc.getText({
-      start: { line: commentBlockIndex, character: 0 },
-      end: { line: commentBlockIndex + 1, character: 0 },
-    })
-
-    // iterate on every line above and including
-    // the current line until getComment returns null
-    let currentComment: string | null = ''
-    while ((currentComment = getComment(currentLine)) !== null) {
-      commentBlock.push(currentComment)
-      commentBlockIndex -= 1
-      currentLine = doc.getText({
-        start: { line: commentBlockIndex, character: 0 },
-        end: { line: commentBlockIndex + 1, character: 0 },
+    const block = commentLinesAbove(analyzedDoc.document.getText().split('\n'), line)
+    const signature = analyzedDoc.functionSignatures?.get(line) ?? null
+    const doc = block ? parseDocComment(block.lines) : null
+    if (doc) {
+      return renderDocComment({
+        doc,
+        name: signature?.name ?? null,
+        params: signature?.params ?? null,
       })
     }
 
-    if (commentBlock.length) {
-      // since we searched from bottom up, we then reverse
-      // the lines so that it reads top down.
-      commentBlock.reverse()
-      // Comments are Markdown: hovers render lists, emphasis and code fences.
-      return commentBlock.join('\n')
-    }
+    // Comments are Markdown: hovers render lists, emphasis and code fences.
+    const markdown = block?.lines.filter((l) => !/^\s*bash-ide\s/.test(l)).join('\n')
+    const synopsis = signature ? renderSynopsis(signature.name, signature.params) : ''
+    const parts = [synopsis, markdown ?? ''].filter((part) => part)
+    return parts.length ? parts.join('\n\n') : null
+  }
 
-    // no comments found above line:
-    return null
+  /** The signature of the function defined on the given line, if known. */
+  public getFunctionSignature(uri: string, line: number): FunctionSignature | null {
+    return this.uriToAnalyzedDocument[uri]?.functionSignatures?.get(line) ?? null
   }
 
   /**

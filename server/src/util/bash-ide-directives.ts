@@ -11,6 +11,7 @@
  *   # bash-ide source=<path>
  *   # bash-ide transitive-source=<path>
  *   # bash-ide constexpr
+ *   # bash-ide parse-func-sig
  */
 
 /**
@@ -25,6 +26,7 @@ export type BashIdeDirectiveType =
   | 'source'
   | 'transitive-source'
   | 'constexpr'
+  | 'parse-func-sig'
 
 /**
  * A parsed bash-ide directive.
@@ -114,6 +116,8 @@ export function parseBashIdeDirectives(fileContent: string): {
       directives.push({ type: 'transitive-source', value, line: i })
     } else if (content === 'constexpr') {
       directives.push({ type: 'constexpr', line: i })
+    } else if (content === 'parse-func-sig') {
+      directives.push({ type: 'parse-func-sig', line: i })
     }
   }
 

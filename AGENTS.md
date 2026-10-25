@@ -21,6 +21,7 @@
 | Parser | `server/src/parser.ts`: loads the bundled `server/tree-sitter-bash.wasm` |
 | Shell semantics | `server/src/util/`: declaration, scope, sourcing, syntax-tree and LSP helpers |
 | Flow analysis | `server/src/util/flow-analysis.ts`, `flow-value.ts`, `bash-ide-directives.ts`, `constexpr-evaluator.ts`: opt-in value resolution, inlay hints, constant-branch dimming |
+| Doc comments | `server/src/util/doc-comments.ts`, `function-signature.ts`: Markdown doc tags, hover rendering, `parse-func-sig` signatures |
 | External tools | `server/src/shellcheck/` and `server/src/shfmt/` |
 | Configuration | `server/src/config.ts`; VS Code settings in `vscode-client/package.json` |
 | VS Code extension | `vscode-client/src/`: client lifecycle and server startup |

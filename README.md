@@ -13,7 +13,8 @@ Documentation around configuration variables can be found in the [config.ts](htt
 - Code completion
 - Simple diagnostics reporting
 - ShellCheck quick fixes and actions to disable a rule for a command or the entire file
-- Documentation for symbols on hover
+- Documentation for symbols on hover, from Markdown comments with optional [doc tags](#documentation-comments)
+- Function signatures from doc tags and `# bash-ide parse-func-sig`, shown on hover over a function and its arguments
 - Workspace symbols
 - Rename symbol
 - Format document
@@ -236,6 +237,74 @@ properties are read from `.editorconfig` - indentation preferences are still pro
 so to format using the indentation specified in `.editorconfig` make sure your editor is also
 configured to read `.editorconfig`. It is possible to disable `.editorconfig` support and always use
 the language server config by setting the "Ignore Editorconfig" configuration variable.
+
+## Documentation comments
+
+The comment block directly above a function or variable is its documentation, shown on hover and
+in completions. It is Markdown, so lists, emphasis and fenced examples render; lines with no blank
+`#` line between them join into one paragraph.
+
+Lines starting with an shdoc-style tag describe a function by section. A tag's text is Markdown
+that runs until the next tag, and text before the first tag is the description:
+
+```bash
+# Convert a path to an absolute path.
+#
+# @arg $1 {path} dir Path to convert
+# @arg $2 {path} [cwd=$PWD] Base directory for relative paths
+# @arg $@ {string} parts... Further parts:
+#   - joined with `/`
+# @set BU_RET {path} The absolute path
+# @exitcode 0 Always
+# @notes
+# - Does not resolve symlinks
+# @example
+# bu_realpath ../dir /home
+bu_realpath() { ...; }
+```
+
+| Tag | Meaning |
+|-----|---------|
+| `@arg $N {type} name text` | A required parameter |
+| `@arg $N {type} [name] text`, `[name=default]` | An optional parameter, with its default |
+| `@arg $@ {type} name... text` | The arguments after the numbered ones |
+| `@arg $N type text` | shdoc's form, which names no parameter |
+| `@noargs` | The function takes no arguments |
+| `@set NAME {type} text` | A variable the function sets, such as `BU_RET` |
+| `@stdin`, `@stdout`, `@stderr`, `@exitcode N` | What the function reads, prints and returns |
+| `@notes`, `@example`, `@see name`, `@description`, `@deprecated` | Further sections |
+
+Types are free text: `string`, `int`, `bool`, `path`, `var` (the name of a variable),
+`var:array`, `a|b|c` and so on. Hovering an argument in a call shows the parameter it fills, unless
+an earlier argument such as `"$@"` or an unquoted `$var` may expand to any number of words.
+
+### `# bash-ide parse-func-sig`
+
+Placed in the comment block directly above a function, this directive promises that the function
+declares its parameters trivially, so the server reads its signature from the body:
+
+```bash
+# @arg $1 {path} dir Path to convert
+# @arg $2 {path} [cwd=$PWD] Base directory
+# @arg $@ {string} parts... Further parts
+# bash-ide parse-func-sig
+bu_realpath() {
+    local -r dir=$1          # $1, "$1", ${1}
+    local -r cwd=${2:-$PWD}  # optional: ${N-x}, ${N:-x}; required: ${N?msg}, ${N:?msg}
+    shift 2                  # optional: the rest of "$@" is a further parameter
+    ...
+}
+```
+
+The body starts with `local`, `declare` or `typeset` lines (flags `-r`, `-i`, `-n`, `-x`, `-l`,
+`-u` and `-t`) binding `$1`, `$2`, ... in order. After them, the function may `shift` by the number
+of parameters and use `"$@"` and `$1`, ... for the remaining arguments; without that shift it may
+not read `$N`, `"$@"` or `$*`, use `for name` without `in`, or `shift`. A function without
+parameters may use `"$@"` for all its arguments. No function may run `set --`, and `$#` is always
+allowed. The server warns where a function breaks this promise, and where its `@arg` tags disagree
+with the body: names, optional parameters and defaults, `int` for `local -i`, a `var` type for
+`local -n`, and the rest parameter. Functions without the directive take their signature from their
+`@arg` tags alone.
 
 ## Flow Analysis
 
