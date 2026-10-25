@@ -192,6 +192,15 @@ function positionalValue(
   return { position, optional: true, defaultValue }
 }
 
+/** The positional parameter a `name=$N` assignment binds, or null for any other value. */
+export function boundPosition(assignment: SyntaxNode): number | null {
+  if (assignment.type !== 'variable_assignment' || assignment.namedChildCount !== 2) {
+    return null
+  }
+  const value = assignment.namedChildren[1]
+  return value ? positionalValue(value)?.position ?? null : null
+}
+
 type BoundParam = {
   name: string
   node: SyntaxNode

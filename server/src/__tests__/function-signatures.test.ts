@@ -8,6 +8,7 @@ import Analyzer from '../analyser'
 import { initializeParser } from '../parser'
 import BashServer from '../server'
 import { parseDocComment, renderDocComment } from '../util/doc-comments'
+import { getDeclarationAttributes } from '../util/variable-declarations'
 
 const uri = 'file:///function-signatures.sh'
 let parser: Parser
@@ -702,5 +703,98 @@ describe('hover', () => {
       - \`dir\` *path* — Path to convert
       - \`cwd\` *path*, optional, default \`$PWD\` — Base directory"
     `)
+  })
+
+  const traceback = [
+    '# Dispatch one traceback frame to the active rendering style.',
+    '#',
+    '# @arg $1 {string} style Style (short or full)',
+    '# @arg $2 {int} [idx=0] Frame index',
+    '# bash-ide parse-func-sig',
+    '__bu_traceback_print_frame()',
+    '{',
+    '    local -r style=$1',
+    '    local -ri idx=${2:-0}',
+    '    local -r frame=$((idx + 1))',
+    '    case "$style" in',
+    '    full) echo "$idx" "$frame" ;;',
+    '    esac',
+    '}',
+  ].join('\n')
+
+  it('accepts the traceback example', () => {
+    expect(analyze(traceback).diagnostics).toEqual([])
+  })
+
+  it('documents a variable that binds a parameter where it is used', async () => {
+    expect(await hover(traceback, 10, 12)).toMatchInlineSnapshot(`
+      "Variable: **style** - *defined on line 8*
+
+      Parameter \`$1\` of \`__bu_traceback_print_frame\` (*string*)
+
+      Style (short or full)
+
+      Attributes: local, readonly"
+    `)
+  })
+
+  it('documents a parameter on its own declaration', async () => {
+    expect(await hover(traceback, 8, 16)).toMatchInlineSnapshot(`
+      "Variable: **idx** - *defined on line 9*
+
+      Parameter \`$2\` of \`__bu_traceback_print_frame\` (*int*, optional, default \`0\`)
+
+      Frame index
+
+      Attributes: local, readonly, integer"
+    `)
+  })
+
+  it('shows only attributes for a local that does not bind a parameter', async () => {
+    expect(await hover(traceback, 11, 25)).toMatchInlineSnapshot(`
+      "Variable: **frame** - *defined on line 10*
+
+      Attributes: local, readonly"
+    `)
+  })
+
+  it('documents parameters of a function with only doc tags', async () => {
+    const source = [
+      '# @arg $1 {path} file File to read',
+      'f() {',
+      '  local file=$1',
+      '  cat "$file"',
+      '}',
+    ].join('\n')
+    expect(await hover(source, 3, 9)).toContain(
+      'Parameter `$1` of `f` (*path*)\n\nFile to read',
+    )
+  })
+
+  it('keeps hovers on plain assignments empty', async () => {
+    expect(await hover('x=1\necho $x', 0, 0)).toBeNull()
+  })
+})
+
+describe('getDeclarationAttributes', () => {
+  it.each([
+    ['f() { local -r a=1; }', ['local', 'readonly']],
+    ['f() { local -ri a=1; }', ['local', 'readonly', 'integer']],
+    ['f() { declare -A a; }', ['local', 'associative array']],
+    ['f() { declare -ga a; }', ['global', 'indexed array']],
+    ['f() { local -n ref=$1; }', ['local', 'nameref']],
+    ['f() { typeset -lx a=b; }', ['local', 'exported', 'lowercase']],
+    ['declare -i a=1', ['integer']],
+    ['local a=1', []],
+    ['readonly -a a=(1)', ['readonly', 'indexed array']],
+    ['export a=1', ['exported']],
+    ['export -n a', []],
+    ['f() { local -x +x a; }', ['local']],
+    ['f() { local "$opts" a; }', ['local']],
+  ])('%s', (source, expected) => {
+    const tree = parser.parse(source)!
+    const command = tree.rootNode.descendantsOfType('declaration_command')[0]!
+    expect(getDeclarationAttributes(command)).toEqual(expected)
+    tree.delete()
   })
 })

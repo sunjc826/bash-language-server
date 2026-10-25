@@ -71,3 +71,49 @@ export function getUnconditionalLocals(body: SyntaxNode): Map<string, number> {
   }
   return locals
 }
+
+// Attributes set by declaration options, in the order they are listed.
+const ATTRIBUTE_OPTIONS: [string, string][] = [
+  ['r', 'readonly'],
+  ['i', 'integer'],
+  ['a', 'indexed array'],
+  ['A', 'associative array'],
+  ['n', 'nameref'],
+  ['x', 'exported'],
+  ['l', 'lowercase'],
+  ['u', 'uppercase'],
+  ['t', 'trace'],
+]
+
+/**
+ * The attributes a declaration command gives the variables it declares, such
+ * as `local` and `readonly` for `local -r name`. Options are read up to the
+ * first word that is not a static option.
+ */
+export function getDeclarationAttributes(command: SyntaxNode): string[] {
+  const keyword = command.firstChild?.text ?? ''
+  const set = new Set<string>()
+  if (keyword === 'readonly') set.add('r')
+  if (keyword === 'export') set.add('x')
+
+  for (const argument of command.namedChildren) {
+    const option = TreeSitterUtil.resolveStaticString(argument)
+    if (option === '--' || !option || !/^[-+]./.test(option)) break
+    for (const letter of option.slice(1)) {
+      // export -n removes the export attribute instead of making a nameref
+      const isUnexport = keyword === 'export' && letter === 'n'
+      if (option.startsWith('-') && !isUnexport) set.add(letter)
+      else set.delete(isUnexport ? 'x' : letter)
+    }
+  }
+
+  const isInFunction = !!TreeSitterUtil.findParentOfType(command, 'function_definition')
+  // `local` outside a function declares nothing local.
+  const scope =
+    ['local', 'declare', 'typeset'].includes(keyword) && isInFunction && !set.has('g')
+      ? ['local']
+      : set.has('g')
+      ? ['global']
+      : []
+  return [...scope, ...ATTRIBUTE_OPTIONS.filter(([o]) => set.has(o)).map(([, a]) => a)]
+}

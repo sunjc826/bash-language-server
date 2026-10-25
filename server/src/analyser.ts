@@ -14,6 +14,7 @@ import { ConstexprEvaluator } from './util/constexpr-evaluator'
 import {
   commentLinesAbove,
   parseDocComment,
+  RenderedParam,
   renderDocComment,
   renderSynopsis,
 } from './util/doc-comments'
@@ -35,7 +36,11 @@ import {
 } from './util/flow-analysis'
 import { concrete, FlowBindings, FlowValue } from './util/flow-value'
 import { getFilePaths } from './util/fs'
-import { FunctionSignature, getFunctionSignatures } from './util/function-signature'
+import {
+  boundPosition,
+  FunctionSignature,
+  getFunctionSignatures,
+} from './util/function-signature'
 import { getInputVariableDeclaration, variableNameRange } from './util/input-declarations'
 import { logger } from './util/logger'
 import { isPositionIncludedInRange } from './util/lsp'
@@ -43,6 +48,7 @@ import { expandPathEnvInitCaptures, matchPathEnvInitPattern } from './util/path-
 import { analyzeFile } from './util/shebang'
 import * as sourcing from './util/sourcing'
 import * as TreeSitterUtil from './util/tree-sitter'
+import { getDeclarationAttributes } from './util/variable-declarations'
 import { Config } from './config'
 
 const BACKGROUND_ANALYSIS_TIMEOUT_MS = 10000
@@ -1401,6 +1407,56 @@ export default class Analyzer {
   /** The signature of the function defined on the given line, if known. */
   public getFunctionSignature(uri: string, line: number): FunctionSignature | null {
     return this.uriToAnalyzedDocument[uri]?.functionSignatures?.get(line) ?? null
+  }
+
+  /**
+   * What the declaration of the variable symbol at `range` says about it: the
+   * attributes its declaration command gives it, such as local and readonly,
+   * and the parameter it binds when its value is `$N` in a function with a
+   * known signature. Null when the symbol is not declared by a command.
+   */
+  public getVariableDeclarationInfo(
+    uri: string,
+    range: LSP.Range,
+  ): {
+    attributes: string[]
+    parameter: { position: number; functionName: string; param: RenderedParam } | null
+  } | null {
+    const analyzedDoc = this.uriToAnalyzedDocument[uri]
+    if (!analyzedDoc) return null
+    let node: SyntaxNode | null = analyzedDoc.tree.rootNode.descendantForPosition({
+      row: range.start.line,
+      column: range.start.character,
+    })
+    while (
+      node &&
+      node.type !== 'variable_assignment' &&
+      node.type !== 'declaration_command'
+    ) {
+      node = node.parent
+    }
+    const assignment = node?.type === 'variable_assignment' ? node : null
+    const command = assignment ? assignment.parent : node
+    if (command?.type !== 'declaration_command') return null
+
+    const attributes = getDeclarationAttributes(command)
+    const position = assignment ? boundPosition(assignment) : null
+    const fn = TreeSitterUtil.findParentOfType(command, 'function_definition')
+    const signature = fn
+      ? analyzedDoc.functionSignatures?.get(fn.startPosition.row)
+      : null
+    const functionName = fn?.namedChildren.find((c) => c?.type === 'word')?.text
+    const param =
+      position !== null && signature && signature.name === functionName
+        ? signature.params.filter((p) => !p.rest)[position - 1]
+        : undefined
+    return {
+      attributes,
+      parameter:
+        param && position !== null && functionName
+          ? { position, functionName, param }
+          : null,
+    }
   }
 
   /**

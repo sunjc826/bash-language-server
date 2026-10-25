@@ -516,7 +516,14 @@ export default class BashServer {
     const symbolStartLine = symbol.location.range.start.line
 
     const commentAboveSymbol = this.analyzer.commentsAbove(symbolUri, symbolStartLine)
-    const symbolDocumentation = commentAboveSymbol ? `\n\n${commentAboveSymbol}` : ''
+    const symbolDocumentation = [
+      ...(symbol.kind === LSP.SymbolKind.Variable
+        ? this.getVariableDocumentation(symbol)
+        : []),
+      ...(commentAboveSymbol ? [commentAboveSymbol] : []),
+    ]
+      .map((part) => `\n\n${part}`)
+      .join('')
     const hoverHeader = `${symbolKindToDescription(symbol.kind)}: **${symbol.name}**`
     const symbolLocation =
       symbolUri !== currentUri
@@ -529,6 +536,30 @@ export default class BashServer {
     return getMarkdownContent(
       `${hoverHeader} - *defined ${symbolLocation}*${symbolDocumentation}`,
     )
+  }
+
+  /**
+   * The attributes a variable is declared with, and the documented parameter
+   * it binds when it is declared as `local name=$N` in a function with a
+   * known signature.
+   */
+  private getVariableDocumentation(symbol: LSP.SymbolInformation): string[] {
+    const info = this.analyzer.getVariableDeclarationInfo(
+      symbol.location.uri,
+      symbol.location.range,
+    )
+    if (!info) return []
+    const parts: string[] = []
+    if (info.parameter) {
+      const { position, functionName, param } = info.parameter
+      const notes = paramNotes(param)
+      parts.push(
+        `Parameter \`$${position}\` of \`${functionName}\`${notes ? ` (${notes})` : ''}`,
+      )
+      if (param.description) parts.push(param.description)
+    }
+    if (info.attributes.length) parts.push(`Attributes: ${info.attributes.join(', ')}`)
+    return parts
   }
 
   private throwResponseError(message: string, code = LSP.LSPErrorCodes.RequestFailed) {
@@ -960,11 +991,15 @@ export default class BashServer {
         symbols: symbolsMatchingWord,
         currentUri,
       })
-        // do not return hover referencing for the current line
+        // do not return hover referencing for the current line, except for
+        // a declared name with attributes or parameter documentation
         .filter(
           (symbol) =>
             symbol.location.uri !== currentUri ||
-            symbol.location.range.start.line !== params.position.line,
+            symbol.location.range.start.line !== params.position.line ||
+            (isOnDeclaredName(symbol, params.position) &&
+              symbol.kind === LSP.SymbolKind.Variable &&
+              this.getVariableDocumentation(symbol).length > 0),
         )
         .map((symbol: LSP.SymbolInformation) =>
           this.getDocumentationForSymbol({ currentUri, symbol }),
@@ -1600,4 +1635,17 @@ export function getCommandOptions(name: string, word: string): string[] {
     .split('\t')
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
+}
+
+/** Whether the position is on the name a symbol declares, at the start of its range. */
+function isOnDeclaredName(
+  symbol: LSP.SymbolInformation,
+  position: LSP.Position,
+): boolean {
+  const { start } = symbol.location.range
+  return (
+    start.line === position.line &&
+    position.character >= start.character &&
+    position.character <= start.character + symbol.name.length
+  )
 }

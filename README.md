@@ -280,6 +280,10 @@ Types are free text: `string`, `int`, `bool`, `path`, `var` (the name of a varia
 an earlier argument such as `"$@"` or an unquoted `$var` may expand to any number of words, or
 the function takes options.
 
+Hovering a variable shows the attributes its declaration gives it, such as `local, readonly` for
+`local -r name`. A variable declared as `local name=$N` in a function with a signature also shows
+the parameter it binds, with the text of its `@arg` tag.
+
 ### `# bash-ide parse-func-sig`
 
 Placed in the comment block directly above a function, this directive promises that the function
