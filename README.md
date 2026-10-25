@@ -270,13 +270,15 @@ bu_realpath() { ...; }
 | `@arg $@ {type} name... text` | The arguments after the numbered ones |
 | `@arg $N type text` | shdoc's form, which names no parameter |
 | `@noargs` | The function takes no arguments |
+| `@option -i\|--idx <index>: text` | An option, which moves the parameters after it |
 | `@set NAME {type} text` | A variable the function sets, such as `BU_RET` |
-| `@stdin`, `@stdout`, `@stderr`, `@exitcode N` | What the function reads, prints and returns |
+| `@stdin`, `@stdout`, `@stderr`, `@exitcode N`, `@returns` | What the function reads, prints and returns |
 | `@notes`, `@example`, `@see name`, `@description`, `@deprecated` | Further sections |
 
 Types are free text: `string`, `int`, `bool`, `path`, `var` (the name of a variable),
 `var:array`, `a|b|c` and so on. Hovering an argument in a call shows the parameter it fills, unless
-an earlier argument such as `"$@"` or an unquoted `$var` may expand to any number of words.
+an earlier argument such as `"$@"` or an unquoted `$var` may expand to any number of words, or
+the function takes options.
 
 ### `# bash-ide parse-func-sig`
 
@@ -300,11 +302,12 @@ The body starts with `local`, `declare` or `typeset` lines (flags `-r`, `-i`, `-
 `-u` and `-t`) binding `$1`, `$2`, ... in order. After them, the function may `shift` by the number
 of parameters and use `"$@"` and `$1`, ... for the remaining arguments; without that shift it may
 not read `$N`, `"$@"` or `$*`, use `for name` without `in`, or `shift`. A function without
-parameters may use `"$@"` for all its arguments. No function may run `set --`, and `$#` is always
-allowed. The server warns where a function breaks this promise, and where its `@arg` tags disagree
-with the body: names, optional parameters and defaults, `int` for `local -i`, a `var` type for
-`local -n`, and the rest parameter. Functions without the directive take their signature from their
-`@arg` tags alone.
+parameters may use `"$@"` for all its arguments, which its `@arg` and `@option` tags then describe.
+No function may run `set --`, and `$#` is always allowed. The server warns where a function breaks
+this promise, and where its `@arg` tags disagree with the body: names, optional parameters and
+defaults, `int` for `local -i`, a `var` type for `local -n`, and the rest parameter, which `@arg $@`
+or `@option` tags document. Functions without the directive take their signature from their `@arg`
+tags alone.
 
 ## Flow Analysis
 

@@ -205,6 +205,46 @@ describe('renderDocComment', () => {
       **@custom** tag text"
     `)
   })
+  it('renders options, returns, separate outputs and examples with prose', () => {
+    const doc = parseDocComment(
+      comment(
+        '# @option -i|--idx <index>: Caller to attribute the line to',
+        '# @option --quiet',
+        '# @stdout The lines',
+        '# @stdout A summary',
+        '# @returns',
+        '# - 0 on success, 1 otherwise',
+        '# @example',
+        '# Log a line:',
+        '# ```bash',
+        '# f -i 1 message',
+        '# ```',
+      ),
+    )
+    expect(renderDocComment({ doc: doc!, name: 'f', params: [] })).toMatchInlineSnapshot(`
+      "\`\`\`bash
+      f [options]
+      \`\`\`
+
+      **Options**
+      - \`-i|--idx <index>\` — Caller to attribute the line to
+      - \`--quiet\`
+
+      **Output**
+      The lines
+
+      A summary
+
+      **Returns**
+      - 0 on success, 1 otherwise
+
+      **Examples**
+      Log a line:
+      \`\`\`bash
+      f -i 1 message
+      \`\`\`"
+    `)
+  })
 })
 
 const REALPATH = [
@@ -243,6 +283,7 @@ describe('parse-func-sig', () => {
           description: 'Base directory',
         },
       ],
+      hasOptions: false,
     })
   })
 
@@ -479,6 +520,41 @@ describe('doc tags and the prologue', () => {
     ).toEqual(expected)
   })
 
+  it('takes the tags of a function that only passes "$@" on', () => {
+    const { analyzer, diagnostics } = analyze(
+      [
+        '# @option --kind KIND: Kind of location',
+        '# @arg $1 {string} name Location name',
+        '# bash-ide parse-func-sig',
+        'register() {',
+        '  __parse "$@"',
+        '}',
+      ].join('\n'),
+    )
+    expect(diagnostics).toEqual([])
+    expect(analyzer.getFunctionSignature(uri, 3)).toMatchObject({
+      params: [{ label: 'name' }],
+      hasOptions: true,
+    })
+  })
+
+  it('accepts options as the documentation of the rest parameter', () => {
+    expect(
+      problems(
+        [
+          '# @arg $1 {string} name Name',
+          '# @option --kind KIND: Kind',
+          '# bash-ide parse-func-sig',
+          'f() {',
+          '  local -r name=$1',
+          '  shift',
+          '  __parse "$@"',
+          '}',
+        ].join('\n'),
+      ),
+    ).toEqual([])
+  })
+
   it('accepts a variable type for a name passed without a nameref', () => {
     expect(
       problems(
@@ -600,6 +676,16 @@ describe('hover', () => {
     expect((await hover(source.join('\n'), callLine + 2, 10)) ?? '').not.toContain(
       'Argument',
     )
+  })
+
+  it('does not map arguments of a function that takes options', async () => {
+    const withOptions = [
+      '# @option -i|--idx <index>: Caller',
+      '# @arg $1 {string} message Message',
+      'log() { :; }',
+      'log -i 2 hello',
+    ].join('\n')
+    expect((await hover(withOptions, 3, 10)) ?? '').not.toContain('Argument')
   })
 
   it('shows the synopsis and tags on the function name', async () => {

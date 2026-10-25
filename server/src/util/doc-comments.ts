@@ -252,9 +252,22 @@ function synopsisWord(param: RenderedParam): string {
   return param.optional ? `[${param.label}]` : param.label
 }
 
-/** A code block showing how to call a function, such as `f dir [cwd]`. */
-export function renderSynopsis(name: string, params: RenderedParam[]): string {
-  return ['```bash', [name, ...params.map(synopsisWord)].join(' '), '```'].join('\n')
+/**
+ * A code block showing how to call a function, such as `f dir [cwd]`, with
+ * `[options]` before the parameters of a function that takes options.
+ */
+export function renderSynopsis(
+  name: string,
+  params: RenderedParam[],
+  hasOptions = false,
+): string {
+  const words = [name, ...(hasOptions ? ['[options]'] : []), ...params.map(synopsisWord)]
+  return ['```bash', words.join(' '), '```'].join('\n')
+}
+
+/** Whether the doc comment documents options with `@option`. */
+export function hasOptionTags(doc: DocComment): boolean {
+  return doc.tags.some((tag) => tag.tag === 'option')
 }
 
 /**
@@ -298,20 +311,27 @@ function describeParam(param: RenderedParam): string {
 }
 
 const SECTION_TITLES: Record<string, string> = {
+  option: 'Options',
   set: 'Sets',
   stdin: 'Input',
   stdout: 'Output',
   stderr: 'Errors',
+  returns: 'Returns',
   exitcode: 'Exit codes',
   notes: 'Notes',
   example: 'Examples',
   see: 'See also',
 }
+// Sections whose tags are Markdown text rather than list items.
+const TEXT_SECTIONS = new Set(['notes', 'stdin', 'stdout', 'stderr', 'returns'])
+const FENCE_LINES = /^\s*(```|~~~)/m
 const SECTION_ORDER = [
+  'option',
   'set',
   'stdin',
   'stdout',
   'stderr',
+  'returns',
   'exitcode',
   'notes',
   'example',
@@ -332,7 +352,7 @@ export function renderDocComment({
   params: RenderedParam[] | null
 }): string {
   const parts: string[] = []
-  if (name && params) parts.push(renderSynopsis(name, params))
+  if (name && params) parts.push(renderSynopsis(name, params, hasOptionTags(doc)))
 
   const byTag = new Map<string, DocTag[]>()
   for (const tag of doc.tags) {
@@ -366,17 +386,15 @@ export function renderDocComment({
     if (!tags.length) continue
     const title = `**${SECTION_TITLES[tag]}**`
     if (tag === 'example') {
+      // An example with a fence of its own may mix prose and code.
       const examples = tags.map((t) =>
-        FENCE_LINE.test(t.text) ? t.text : ['```bash', t.text, '```'].join('\n'),
+        FENCE_LINES.test(t.text) ? t.text : ['```bash', t.text, '```'].join('\n'),
       )
       parts.push([title, ...examples].join('\n'))
-    } else if (
-      tag === 'notes' ||
-      tag === 'stdin' ||
-      tag === 'stdout' ||
-      tag === 'stderr'
-    ) {
-      parts.push([title, ...tags.map((t) => t.text)].join('\n'))
+    } else if (TEXT_SECTIONS.has(tag)) {
+      parts.push(`${title}\n${tags.map((t) => t.text).join('\n\n')}`)
+    } else if (tag === 'option') {
+      parts.push([title, ...tags.map((t) => optionItem(t.text))].join('\n'))
     } else {
       parts.push([title, ...tags.map((t) => sectionItem(tag, t.text))].join('\n'))
     }
@@ -387,6 +405,15 @@ export function renderDocComment({
     for (const t of tags) parts.push(`**@${tag}**${t.text ? ` ${t.text}` : ''}`)
   }
   return parts.join('\n\n')
+}
+
+/** `@option -v|--verbose <level>: text`, or the option alone, as a list item. */
+function optionItem(text: string): string {
+  const [first, ...more] = text.split('\n')
+  const colon = first.indexOf(': ')
+  const spec = colon < 0 ? first : first.slice(0, colon)
+  const body = colon < 0 ? undefined : [first.slice(colon + 2), ...more].join('\n')
+  return listItem(`\`${spec}\``, body)
 }
 
 /** `@set NAME {type} text`, `@exitcode N text` and `@see target` list items. */

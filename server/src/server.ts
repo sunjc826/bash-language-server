@@ -1124,7 +1124,8 @@ export default class BashServer {
       location.range.start.line,
     )
     if (signature?.name !== words[0]) return undefined
-    if (!isPositionKnown) return null
+    // Options before the parameters move them to later words.
+    if (!isPositionKnown || signature.hasOptions) return null
 
     const positional = signature.params.filter((param) => !param.rest)
     const param =

@@ -16,6 +16,7 @@ import {
   commentLinesAbove,
   DocComment,
   DocParam,
+  hasOptionTags,
   parseDocComment,
   RenderedParam,
   slotLabel,
@@ -28,6 +29,8 @@ export type FunctionSignature = {
   name: string
   /** Positional parameters in order, then the rest parameter, if any. */
   params: RenderedParam[]
+  /** Whether `@option` tags document options, which shift the parameters. */
+  hasOptions: boolean
 }
 
 /**
@@ -77,7 +80,9 @@ export function getFunctionSignatures(
     }
     const { params, problems } = buildSignature({ prologue, doc, docLineRange })
     // A comment block documents the first function defined on its next line.
-    if (params && !signatures.has(row)) signatures.set(row, { name, params })
+    if (params && !signatures.has(row)) {
+      signatures.set(row, { name, params, hasOptions: !!doc && hasOptionTags(doc) })
+    }
 
     // Half-typed code is reported once it parses.
     if (fn.hasError) continue
@@ -365,7 +370,14 @@ export function buildSignature({
   const report = (param: DocParam | { line: number }, message: string) =>
     problems.push({ range: docLineRange(param.line), message })
 
-  if (prologue) {
+  // A function that binds nothing and passes "$@" on, often to an option
+  // parser, takes whatever its tags describe.
+  const forwardsAll =
+    !!prologue &&
+    prologue.params.length === 0 &&
+    prologue.rest &&
+    (docParams.length > 0 || (!!doc && hasOptionTags(doc)))
+  if (prologue && !forwardsAll) {
     const isDocumented = docParams.length > 0 || !!noArgs
     if (noArgs && (prologue.params.length > 0 || prologue.rest)) {
       report(noArgs, '@noargs, but the function takes parameters')
@@ -407,7 +419,8 @@ export function buildSignature({
       )
     }
     if (prologue.rest) {
-      if (isDocumented && !docRest && !noArgs) {
+      // Options passed on in "$@" document it too.
+      if (isDocumented && !docRest && !noArgs && !(doc && hasOptionTags(doc))) {
         problems.push({
           range: docLineRange(docParams[docParams.length - 1]?.line ?? 0),
           message: 'The function takes further arguments as "$@", which have no @arg $@',
@@ -418,7 +431,9 @@ export function buildSignature({
     return { params, problems }
   }
 
-  if (docParams.length === 0) return { params: noArgs ? [] : null, problems }
+  if (docParams.length === 0) {
+    return { params: noArgs || forwardsAll ? [] : null, problems }
+  }
   const params: RenderedParam[] = docParams
     .filter((p): p is DocParam & { slot: number } => p.slot !== 'rest')
     .sort((a, b) => a.slot - b.slot)
