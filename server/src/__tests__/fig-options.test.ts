@@ -12,6 +12,7 @@ import * as childProcess from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
+import * as LSP from 'vscode-languageserver/node'
 import { TextDocument } from 'vscode-languageserver-textdocument'
 
 import { getMockConnection } from '../../../testing/mocks'
@@ -36,6 +37,7 @@ const SPECS: Record<string, FigCommand> = {
     subcommands: [
       {
         name: ['commit', 'ci'],
+        description: 'Record changes to the repository',
         options: [
           { name: ['-m', '--message'], description: 'Commit message', argCount: 1 },
           { name: ['-a', '--all'], description: 'Stage all changes' },
@@ -69,7 +71,12 @@ const SPECS: Record<string, FigCommand> = {
         description: 'Extract files from an archive',
         options: [
           { name: ['z', '-z', '--gzip'], description: 'Filter through gzip' },
-          { name: ['f', '-f', '--file'], description: 'Archive file', argCount: 1 },
+          {
+            name: ['f', '-f', '--file'],
+            description: 'Archive file',
+            argCount: 1,
+            args: [{ name: 'ARCHIVE' }],
+          },
           { name: ['--strip-components'], argCount: 1 },
         ],
       },
@@ -84,6 +91,19 @@ const SPECS: Record<string, FigCommand> = {
     options: [
       { name: ['v', '-v', '--verbose'], description: 'Verbose', isPersistent: true },
     ],
+  },
+  cp: {
+    name: ['cp'],
+    options: [{ name: ['-r'], description: 'Copy directories recursively' }],
+    args: [
+      { name: 'source', isVariadic: true },
+      { name: 'target', description: 'Where to copy to' },
+    ],
+  },
+  sudo: {
+    name: ['sudo'],
+    options: [{ name: ['-u'], argCount: 1, args: [{ name: 'user' }] }],
+    args: [{ name: 'command', isCommand: true }],
   },
   go: {
     name: ['go'],
@@ -242,6 +262,51 @@ describe('FigSpecs.describeOption', () => {
   })
 })
 
+describe('FigSpecs.describeArgument', () => {
+  const describe_ = (words: string[], index: number) =>
+    new FigSpecs(specDirectory).describeArgument(words, index)
+
+  it('maps arguments to slots, counting slots after a variadic one from the end', () => {
+    expect(describe_(['cp', 'a', 'b', 'c'], 1)).toMatchObject({ name: 'source' })
+    expect(describe_(['cp', 'a', 'b', 'c'], 2)).toMatchObject({ name: 'source' })
+    expect(describe_(['cp', '-r', 'a', 'b', 'c'], 4)).toEqual({
+      kind: 'argument',
+      name: 'target',
+      description: 'Where to copy to',
+    })
+    // After --, a dash-prefixed word is an argument too.
+    expect(describe_(['cp', '--', '-x', 'y'], 2)).toMatchObject({ name: 'source' })
+    expect(describe_(['cp', '-r', 'a'], 1)).toBeNull()
+  })
+
+  it('describes option values and subcommands', () => {
+    expect(describe_(['tar', '-xzf', 'a.tgz', 'member'], 2)).toEqual({
+      kind: 'value',
+      option: '-f',
+      name: 'ARCHIVE',
+    })
+    expect(describe_(['git', '-C', 'repo', 'ci'], 3)).toEqual({
+      kind: 'subcommand',
+      name: 'ci',
+      description: 'Record changes to the repository',
+    })
+    // A subcommand name in an argument position is just an argument.
+    expect(describe_(['git', 'commit', '-m', 'commit'], 3)).toMatchObject({
+      kind: 'value',
+      option: '-m',
+    })
+  })
+
+  it('follows a nested command such as sudo git', () => {
+    const words = ['sudo', '-u', 'root', 'git', 'commit', '--a']
+    expect(describe_(words, 2)).toMatchObject({ kind: 'value', name: 'user' })
+    expect(describe_(words, 3)).toBeNull()
+    expect(describe_(words, 4)).toMatchObject({ kind: 'subcommand', name: 'commit' })
+    expect(names(words.slice(0, 5), '--a')).toEqual(['--all', '--amend'])
+    expect(names(['sudo', 'missing'], '-')).toBeNull()
+  })
+})
+
 describe('option completion', () => {
   afterEach(() => vi.restoreAllMocks())
 
@@ -292,11 +357,14 @@ describe('option completion', () => {
   })
 
   it('completes builtin options from bash help before Fig', async () => {
-    vi.spyOn(sh, 'getBuiltinOptions').mockResolvedValue([
-      { name: ['-f'], description: 'treat each NAME as a shell function' },
-      { name: ['-v'], description: 'treat each NAME as a shell variable' },
-      { name: ['-n'], description: 'treat each NAME as a name reference' },
-    ])
+    vi.spyOn(sh, 'getBuiltinSpec').mockResolvedValue({
+      name: ['unset'],
+      options: [
+        { name: ['-f'], description: 'treat each NAME as a shell function' },
+        { name: ['-v'], description: 'treat each NAME as a shell variable' },
+        { name: ['-n'], description: 'treat each NAME as a name reference' },
+      ],
+    })
     const getOptions = vi.spyOn(FigSpecs.prototype, 'getOptions')
     const spawn = vi.spyOn(childProcess, 'spawnSync')
 
@@ -311,12 +379,13 @@ describe('option completion', () => {
       expect.objectContaining({ label: '-v' }),
       expect.objectContaining({ label: '-n' }),
     ])
-    expect(getOptions).not.toHaveBeenCalled()
+    // Fig is only consulted with the help spec as the root.
+    expect(getOptions.mock.calls.every(([, , root]) => root !== undefined)).toBe(true)
     expect(spawn).not.toHaveBeenCalled()
   })
 
   it('completes builtin options from Fig when help lists none', async () => {
-    vi.spyOn(sh, 'getBuiltinOptions').mockResolvedValue([])
+    vi.spyOn(sh, 'getBuiltinSpec').mockResolvedValue(null)
     const getOptions = vi
       .spyOn(FigSpecs.prototype, 'getOptions')
       .mockReturnValue([{ name: '-r', description: 'Read-only' }])
@@ -407,12 +476,15 @@ describe('option hover', () => {
   })
 
   it('describes builtin options from bash help before Fig', async () => {
-    vi.spyOn(sh, 'getBuiltinOptions').mockResolvedValue([
-      { name: ['-f'], description: 'treat each NAME as a shell function' },
-      { name: ['-v'], description: 'treat each NAME as a shell variable' },
-      { name: ['-a'], description: 'to make NAMEs indexed arrays' },
-      { name: ['-x'], description: 'to make NAMEs export' },
-    ])
+    vi.spyOn(sh, 'getBuiltinSpec').mockResolvedValue({
+      name: ['builtin'],
+      options: [
+        { name: ['-f'], description: 'treat each NAME as a shell function' },
+        { name: ['-v'], description: 'treat each NAME as a shell variable' },
+        { name: ['-a'], description: 'to make NAMEs indexed arrays' },
+        { name: ['-x'], description: 'to make NAMEs export' },
+      ],
+    })
     const describeOption = vi.spyOn(FigSpecs.prototype, 'describeOption')
 
     expect(await hover('unset -f my_function\n', 0, 7)).toEqual({
@@ -427,11 +499,11 @@ describe('option hover', () => {
         value: '`-a`\n\nto make NAMEs indexed arrays\n\n`-x`\n\nto make NAMEs export',
       },
     })
-    expect(describeOption).not.toHaveBeenCalled()
+    expect(describeOption.mock.calls.every(([, , root]) => root !== undefined)).toBe(true)
   })
 
   it('uses Fig for builtin options that help does not list', async () => {
-    vi.spyOn(sh, 'getBuiltinOptions').mockResolvedValue([])
+    vi.spyOn(sh, 'getBuiltinSpec').mockResolvedValue(null)
     vi.spyOn(FigSpecs.prototype, 'describeOption').mockReturnValue([
       { name: ['-v'], description: 'Variable definition will be unset' },
     ])
@@ -442,6 +514,57 @@ describe('option hover', () => {
         value: '`-v`\n\nVariable definition will be unset',
       },
     })
+  })
+
+  it('shows the argument slot of a word, with any symbol documentation', async () => {
+    vi.spyOn(sh, 'getBuiltinSpec').mockResolvedValue({
+      name: ['unset'],
+      options: [{ name: ['-f'], description: 'treat each NAME as a shell function' }],
+      args: [{ name: 'name', isOptional: true, isVariadic: true }],
+    })
+    const documentation = vi.spyOn(sh, 'getShellDocumentation')
+
+    const result = (await hover('f() { :; }\nunset -f f\n', 1, 9)) as LSP.Hover
+
+    expect(result.contents).toEqual({
+      kind: 'markdown',
+      value: expect.stringMatching(
+        /^Argument `name\.\.\.` \(optional\)\n\n---\n\nFunction: \*\*f\*\*/,
+      ),
+    })
+    expect(documentation).not.toHaveBeenCalled()
+  })
+
+  it('does not document an argument as the command it is named after', async () => {
+    vi.spyOn(sh, 'getBuiltinSpec').mockResolvedValue({
+      name: ['echo'],
+      args: [{ name: 'arg', isOptional: true, isVariadic: true }],
+    })
+    const documentation = vi.spyOn(sh, 'getShellDocumentation')
+
+    expect(await hover('echo cd\n', 0, 6)).toEqual({
+      contents: { kind: 'markdown', value: 'Argument `arg...` (optional)' },
+    })
+    expect(documentation).not.toHaveBeenCalled()
+  })
+
+  it('shows the value an option word is given', async () => {
+    const describeArgument = vi
+      .spyOn(FigSpecs.prototype, 'describeArgument')
+      .mockReturnValue({
+        kind: 'value',
+        option: '-f',
+        name: 'ARCHIVE',
+        description: 'Archive file',
+      })
+
+    expect(await hover('tar -xzf archive.tgz\n', 0, 12)).toEqual({
+      contents: {
+        kind: 'markdown',
+        value: 'Value of `-f`: `ARCHIVE`\n\nArchive file',
+      },
+    })
+    expect(describeArgument).toHaveBeenCalledWith(['tar', '-xzf', 'archive.tgz'], 2)
   })
 
   it('falls through when Fig has no description', async () => {

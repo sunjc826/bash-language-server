@@ -24,16 +24,11 @@ import {
 } from './util/path-completion'
 import { formatFlowValue, tryGetArrayElements } from './util/flow-value'
 import { getEmbeddedSemanticTokens, SEMANTIC_TOKEN_LEGEND } from './util/embedded-tokens'
-import {
-  FigOption,
-  FigOptionSuggestion,
-  FigSpecs,
-  parseOptionWord,
-} from './util/fig-options'
+import { FigCommand, FigOptionSuggestion, FigSpecs } from './util/fig-options'
 import { uniqueBasedOnHash } from './util/array'
 import { logger, setLogConnection, setLogLevel } from './util/logger'
 import { isPositionIncludedInRange } from './util/lsp'
-import { getBuiltinOptions, getShellDocumentation } from './util/sh'
+import { getBuiltinSpec, getShellDocumentation } from './util/sh'
 
 const PARAMETER_EXPANSION_PREFIXES = new Set(['$', '${'])
 const CONFIGURATION_SECTION = 'bashIde'
@@ -670,14 +665,13 @@ export default class BashServer {
         // Builtins are described by bash's own help text. Otherwise prefer the
         // bundled Fig specs, which know subcommands and describe each option,
         // and fall back to bash-completion for commands without a spec.
-        const helpOptions = await this.getHelpOptions(commandWords)
+        const helpSpec = await this.getHelpSpec(commandWords[0])
         const options: FigOptionSuggestion[] =
-          helpOptions.length > 0
-            ? helpOptions
-                .filter((option) => option.name[0].startsWith(word))
-                .map(({ name: [name], description }) => ({ name, description }))
-            : this.figSpecs.getOptions(commandWords, word) ??
-              getCommandOptions(commandWords[0], word).map((name) => ({ name }))
+          (helpSpec?.options?.length
+            ? this.figSpecs.getOptions(commandWords, word, helpSpec)
+            : null) ??
+          this.figSpecs.getOptions(commandWords, word) ??
+          getCommandOptions(commandWords[0], word).map((name) => ({ name }))
 
         optionsCompletions = options.map(({ name, description }) => ({
           label: name,
@@ -949,12 +943,48 @@ export default class BashServer {
       return { contents: { kind: 'markdown', value: optionDocumentation } }
     }
 
+    // Names given to builtins such as `unset -f name` parse as variables.
+    const argumentDocumentation = !word.startsWith('-')
+      ? await this.getArgumentDocumentation(params)
+      : null
+
     const symbolsMatchingWord = this.analyzer.findDeclarationsMatchingWord({
       exactMatch: true,
       uri: currentUri,
       word,
       position: params.position,
     })
+    const getSymbolDocumentation = (): LSP.MarkupContent | null => {
+      const symbolDocumentation = deduplicateSymbols({
+        symbols: symbolsMatchingWord,
+        currentUri,
+      })
+        // do not return hover referencing for the current line
+        .filter(
+          (symbol) =>
+            symbol.location.uri !== currentUri ||
+            symbol.location.range.start.line !== params.position.line,
+        )
+        .map((symbol: LSP.SymbolInformation) =>
+          this.getDocumentationForSymbol({ currentUri, symbol }),
+        )
+      return symbolDocumentation.length === 1 ? symbolDocumentation[0] : null
+    }
+
+    if (argumentDocumentation) {
+      // The word is an argument here, so do not document it as a command;
+      // a function or variable it names is still worth showing.
+      const symbolDocumentation = getSymbolDocumentation()
+      return {
+        contents: {
+          kind: 'markdown',
+          value: symbolDocumentation
+            ? `${argumentDocumentation}\n\n---\n\n${symbolDocumentation.value}`
+            : argumentDocumentation,
+        },
+      }
+    }
+
     if (
       !isVariable &&
       (ReservedWords.isReservedWord(word) ||
@@ -969,22 +999,9 @@ export default class BashServer {
         return { contents: getMarkdownContent(shellDocumentation, 'man') }
       }
     } else {
-      const symbolDocumentation = deduplicateSymbols({
-        symbols: symbolsMatchingWord,
-        currentUri,
-      })
-        // do not return hover referencing for the current line
-        .filter(
-          (symbol) =>
-            symbol.location.uri !== currentUri ||
-            symbol.location.range.start.line !== params.position.line,
-        )
-        .map((symbol: LSP.SymbolInformation) =>
-          this.getDocumentationForSymbol({ currentUri, symbol }),
-        )
-
-      if (symbolDocumentation.length === 1) {
-        return { contents: symbolDocumentation[0] }
+      const symbolDocumentation = getSymbolDocumentation()
+      if (symbolDocumentation) {
+        return { contents: symbolDocumentation }
       }
     }
 
@@ -1008,11 +1025,10 @@ export default class BashServer {
     )
     if (!commandWords) return null
 
-    const helpOptions = parseOptionWord(
-      word,
-      await this.getHelpOptions(commandWords),
-      false,
-    ).options
+    const helpSpec = await this.getHelpSpec(commandWords[0])
+    const helpOptions = helpSpec?.options?.length
+      ? this.figSpecs.describeOption(commandWords, word, helpSpec) ?? []
+      : []
     const options = (
       helpOptions.length > 0
         ? helpOptions
@@ -1029,11 +1045,55 @@ export default class BashServer {
   }
 
   /**
-   * The options bash's `help` lists for a builtin, unless `--` already ended
-   * its options. Empty for other commands.
+   * Describe the argument word at the given position: the subcommand it
+   * names, the option it is the value of, or the argument slot it fills.
    */
-  private async getHelpOptions([name, ...args]: string[]): Promise<FigOption[]> {
-    return Builtins.isBuiltin(name) && !args.includes('--') ? getBuiltinOptions(name) : []
+  private async getArgumentDocumentation(
+    params: LSP.TextDocumentPositionParams,
+  ): Promise<string | null> {
+    const argument = this.analyzer.commandArgumentAtPoint(
+      params.textDocument.uri,
+      params.position.line,
+      params.position.character,
+    )
+    if (!argument) return null
+
+    const { words, index } = argument
+    const helpSpec = await this.getHelpSpec(words[0])
+    const description =
+      (helpSpec?.args?.length
+        ? this.figSpecs.describeArgument(words, index, helpSpec)
+        : null) ?? this.figSpecs.describeArgument(words, index)
+    if (!description) return null
+
+    let label: string
+    switch (description.kind) {
+      case 'subcommand':
+        if (!description.description) return null
+        label = `Subcommand \`${description.name}\``
+        break
+      case 'value':
+        label = `Value of \`${description.option}\`${
+          description.name ? `: \`${description.name}\`` : ''
+        }`
+        break
+      case 'argument':
+        label = `Argument${
+          description.name
+            ? ` \`${description.name}${description.isVariadic ? '...' : ''}\``
+            : ''
+        }${description.isOptional ? ' (optional)' : ''}`
+        break
+    }
+    return description.description ? `${label}\n\n${description.description}` : label
+  }
+
+  /**
+   * A spec built from bash's `help` text for a builtin, whose options and
+   * usage match the installed shell. Null for other commands.
+   */
+  private async getHelpSpec(name: string): Promise<FigCommand | null> {
+    return Builtins.isBuiltin(name) ? getBuiltinSpec(name) : null
   }
 
   /**

@@ -632,11 +632,63 @@ describe('parseHelpOptions', () => {
   })
 })
 
-describe('getBuiltinOptions', () => {
+describe('parseHelpSynopsis', () => {
+  const slots = (usage: string) =>
+    sh
+      .parseHelpSynopsis(`${usage}\n    Description.`)
+      .map(
+        (a) =>
+          `${a.name}${a.isVariadic ? '...' : ''}${a.isOptional ? '?' : ''}${
+            a.isCommand ? '!' : ''
+          }`,
+      )
+
+  it('reads argument slots and skips option groups', () => {
+    expect(slots('unset: unset [-f] [-v] [-n] [name ...]')).toEqual(['name...?'])
+    expect(slots('printf: printf [-v var] format [arguments]')).toEqual([
+      'format',
+      'arguments?',
+    ])
+    expect(slots('getopts: getopts optstring name [arg ...]')).toEqual([
+      'optstring',
+      'name',
+      'arg...?',
+    ])
+    expect(slots('cd: cd [-L|[-P [-e]]] [-@] [dir]')).toEqual(['dir?'])
+    expect(slots('local: local [option] name[=value] ...')).toEqual(['name[=value]...'])
+  })
+
+  it('reads only the first form of the usage line', () => {
+    expect(
+      slots(
+        'declare: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [name ...]',
+      ),
+    ).toEqual(['name[=value]...?'])
+  })
+
+  it('treats a command slot as another command', () => {
+    expect(slots('command: command [-pVv] command [arg ...]')).toEqual([
+      'command!',
+      'arg...?',
+    ])
+  })
+
+  it('stops at alternatives and nested groups', () => {
+    expect(
+      slots(
+        'kill: kill [-s sigspec | -n signum | -sigspec] pid | jobspec ... or kill -l',
+      ),
+    ).toEqual([])
+    expect(slots('trap: trap [-Plp] [[action] signal_spec ...]')).toEqual([])
+    expect(slots('pushd: pushd [-n] [+N | -N | dir]')).toEqual([])
+  })
+})
+
+describe('getBuiltinSpec', () => {
   it('does not run help for words that are not builtins', async () => {
     const spawn = vi.spyOn(ChildProcess, 'spawn')
     try {
-      expect(await sh.getBuiltinOptions('unset; touch /tmp/x')).toEqual([])
+      expect(await sh.getBuiltinSpec('unset; touch /tmp/x')).toBeNull()
       expect(spawn).not.toHaveBeenCalled()
     } finally {
       spawn.mockRestore()

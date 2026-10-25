@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Extract the static parts of the Fig completion specs (names, descriptions,
-// options and subcommands) into one JSON file per spec. The server reads these
+// options, subcommands and argument slots) into one JSON file per spec. The server reads these
 // for option completion. Generators, scripts and other functions are dropped,
 // so no spec code runs inside the language server.
 //
@@ -38,6 +38,21 @@ const toDescription = (description) =>
 const compact = (object) =>
   Object.fromEntries(Object.entries(object).filter(([, v]) => v !== undefined))
 
+// Argument slots keep their position even when they have no name, so later
+// slots line up with the words they describe.
+function convertArgs(args) {
+  const slots = toArray(args).map((arg) =>
+    compact({
+      name: typeof arg?.name === 'string' && arg.name ? arg.name : undefined,
+      description: toDescription(arg?.description),
+      isOptional: arg?.isOptional === true || undefined,
+      isVariadic: arg?.isVariadic === true || undefined,
+      isCommand: arg?.isCommand === true || undefined,
+    }),
+  )
+  return slots.length ? slots : undefined
+}
+
 function convertOption(option) {
   const name = toNames(option?.name)
   if (option?.hidden || name.length === 0) {
@@ -49,6 +64,7 @@ function convertOption(option) {
     name,
     description: toDescription(option.description),
     argCount: argCount || undefined,
+    args: convertArgs(option.args),
     isPersistent: option.isPersistent === true || undefined,
   })
 }
@@ -73,6 +89,7 @@ function convertCommand(command) {
     description: toDescription(command.description ?? loaded.description),
     options: options.length ? options : undefined,
     subcommands: subcommands.length ? subcommands : undefined,
+    args: convertArgs(loaded.args),
     loadSpec: typeof command.loadSpec === 'string' ? command.loadSpec : undefined,
     posixNoncompliant:
       loaded.parserDirectives?.flagsArePosixNoncompliant === true || undefined,

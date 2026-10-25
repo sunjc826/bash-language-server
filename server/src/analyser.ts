@@ -51,6 +51,14 @@ const OPTION_COMMAND_TYPES: ReadonlySet<string> = new Set([
   'unset_command',
 ])
 
+const EXPANSION_TYPES: ReadonlySet<string> = new Set([
+  'simple_expansion',
+  'expansion',
+  'command_substitution',
+  'arithmetic_expansion',
+  'process_substitution',
+])
+
 // Named children of a command that are not part of its argument words.
 const NON_ARGUMENT_COMMAND_CHILDREN = new Set([
   'comment',
@@ -1249,6 +1257,46 @@ export default class Analyzer {
     }
 
     return words
+  }
+
+  /**
+   * Find all words of the command at the given point, starting with its
+   * name, and the index of the argument word that contains the point. Null
+   * when the point is not on an argument, such as on the name or a redirect,
+   * or the argument contains an expansion.
+   */
+  public commandArgumentAtPoint(
+    uri: string,
+    line: number,
+    column: number,
+  ): { words: string[]; index: number } | null {
+    const command = this.commandAtPoint(uri, line, column, OPTION_COMMAND_TYPES)
+    if (!command) {
+      return null
+    }
+
+    const isAfter = (a: Point, b: Point) =>
+      a.row > b.row || (a.row === b.row && a.column > b.column)
+    const point = { row: line, column }
+    const words = [command.name.text.trim()]
+    let index = -1
+    for (const child of command.node.namedChildren) {
+      if (
+        !child ||
+        child.startIndex <= command.name.startIndex ||
+        NON_ARGUMENT_COMMAND_CHILDREN.has(child.type)
+      ) {
+        continue
+      }
+      if (!isAfter(child.startPosition, point) && isAfter(child.endPosition, point)) {
+        // A word with expansions is described by what it expands to instead.
+        if (child.descendantsOfType([...EXPANSION_TYPES]).length > 0) return null
+        index = words.length
+      }
+      words.push(child.text)
+    }
+
+    return index > 0 ? { words, index } : null
   }
 
   private commandAtPoint(

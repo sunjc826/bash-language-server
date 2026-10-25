@@ -2,7 +2,7 @@ import * as ChildProcess from 'child_process'
 import { basename, isAbsolute } from 'path'
 
 import { isBuiltin } from '../builtins'
-import { FigOption } from './fig-options'
+import { FigArg, FigCommand, FigOption } from './fig-options'
 import { logger } from './logger'
 import { isWindows } from './platform'
 
@@ -227,18 +227,84 @@ export function parseHelpOptions(help: string): FigOption[] {
 }
 
 /**
- * The options a builtin's `help` text describes, or none when the builtin
- * is unknown or bash cannot describe it.
+ * The argument slots in the usage line of a builtin's `help` text, such as
+ * `unset: unset [-f] [-v] [-n] [name ...]`. Option groups are skipped. Only
+ * the first form is read when the line lists several (`... or declare -p`),
+ * and reading stops at alternatives or nested groups, which a slot list
+ * cannot express, so later words get no slot rather than a wrong one.
  */
-export const getBuiltinOptions: (builtin: string) => Promise<FigOption[]> = memorize(
-  async (builtin: string): Promise<FigOption[]> => {
+export function parseHelpSynopsis(help: string): FigArg[] {
+  const usage = help.split('\n')[0] ?? ''
+  const form = usage.slice(usage.indexOf(': ') + 2).split(' or ')[0]
+  const [, ...elements] = splitSynopsis(form)
+
+  const slots: FigArg[] = []
+  for (const [i, element] of elements.entries()) {
+    // `pid | jobspec ...`: the slot is one of several things.
+    if (elements[i + 1] === '|') break
+    const isGroup = element.startsWith('[')
+    const content = isGroup ? element.slice(1, -1).trim() : element
+    if (element === '...' && slots.length > 0) {
+      slots[slots.length - 1].isVariadic = true
+      continue
+    }
+    // Option groups such as [-f], [-a array] or local's [option].
+    if (isGroup && (/^[-+]/.test(content) || /^options?$/.test(content))) continue
+    if (/[|[\]]/.test(content.replace(/\[=\w+\]/g, '')) || /^[-+]/.test(content)) break
+
+    const words = content.split(/\s+/)
+    const variadic = words[words.length - 1] === '...' || words[0].endsWith('...')
+    const name = words[0].replace(/\.\.\.$/, '')
+    if (words.length > (words[words.length - 1] === '...' ? 2 : 1)) break
+    slots.push({
+      name,
+      ...(isGroup && { isOptional: true }),
+      ...(variadic && { isVariadic: true }),
+      // `command git ...` runs another command, like sudo.
+      ...(name === 'command' && { isCommand: true }),
+    })
+  }
+  return slots
+}
+
+/** Split a usage line into words and top-level `[...]` groups. */
+function splitSynopsis(form: string): string[] {
+  const elements: string[] = []
+  let depth = 0
+  let current = ''
+  for (const char of form) {
+    if (char === ' ' && depth === 0) {
+      if (current) elements.push(current)
+      current = ''
+      continue
+    }
+    if (char === '[') depth++
+    if (char === ']') depth--
+    current += char
+  }
+  if (current) elements.push(current)
+  return elements
+}
+
+/**
+ * A spec for a builtin built from its `help` text: the options it lists and
+ * the argument slots of its usage line. Null when the builtin is unknown or
+ * bash cannot describe it.
+ */
+export const getBuiltinSpec: (builtin: string) => Promise<FigCommand | null> = memorize(
+  async (builtin: string): Promise<FigCommand | null> => {
     // The name is interpolated into the script, so only accept known builtins.
-    if (!isBuiltin(builtin)) return []
+    if (!isBuiltin(builtin)) return null
     try {
-      return parseHelpOptions(await execShellScript(`help ${builtin}`))
+      const help = await execShellScript(`help ${builtin}`)
+      const options = parseHelpOptions(help)
+      const args = parseHelpSynopsis(help)
+      return options.length > 0 || args.length > 0
+        ? { name: [builtin], options, args }
+        : null
     } catch (error) {
-      logger.error(`getBuiltinOptions failed for "${builtin}"`, error)
-      return []
+      logger.error(`getBuiltinSpec failed for "${builtin}"`, error)
+      return null
     }
   },
 )
