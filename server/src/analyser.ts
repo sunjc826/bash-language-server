@@ -42,6 +42,15 @@ const BACKGROUND_ANALYSIS_TIMEOUT_MS = 10000
 // Upper bound on sourced files analyzed for one document's flow analysis.
 const MAX_FLOW_SOURCED_ANALYSES = 100
 
+const SIMPLE_COMMAND_TYPES: ReadonlySet<string> = new Set(['command'])
+// Commands whose options can be looked up, including builtins with their own
+// node types: declare, export, local, readonly, typeset and unset.
+const OPTION_COMMAND_TYPES: ReadonlySet<string> = new Set([
+  'command',
+  'declaration_command',
+  'unset_command',
+])
+
 // Named children of a command that are not part of its argument words.
 const NON_ARGUMENT_COMMAND_CHILDREN = new Set([
   'comment',
@@ -1215,10 +1224,12 @@ export default class Analyzer {
 
   /**
    * Find the command name and the arguments that end before the given point,
-   * excluding the word at the point.
+   * excluding the word at the point. Unlike commandNameAtPoint, this also
+   * finds builtins that tree-sitter parses on their own, such as `unset -f`
+   * and `declare -a`, so their options can be completed and described.
    */
   public commandWordsAtPoint(uri: string, line: number, column: number): string[] | null {
-    const command = this.commandAtPoint(uri, line, column)
+    const command = this.commandAtPoint(uri, line, column, OPTION_COMMAND_TYPES)
     if (!command) {
       return null
     }
@@ -1244,10 +1255,11 @@ export default class Analyzer {
     uri: string,
     line: number,
     column: number,
+    types: ReadonlySet<string> = SIMPLE_COMMAND_TYPES,
   ): { node: SyntaxNode; name: SyntaxNode } | null {
     let node = this.nodeAtPoint(uri, line, column)
 
-    while (node && node.type !== 'command') {
+    while (node && !types.has(node.type)) {
       node = node.parent
     }
 
@@ -1255,13 +1267,14 @@ export default class Analyzer {
       return null
     }
 
-    const firstChild = node.firstNamedChild
+    // Declaration and unset commands start with their keyword instead.
+    const name = node.type === 'command' ? node.firstNamedChild : node.firstChild
 
-    if (!firstChild || firstChild.type !== 'command_name') {
+    if (!name || (node.type === 'command' && name.type !== 'command_name')) {
       return null
     }
 
-    return { node, name: firstChild }
+    return { node, name }
   }
 
   /**

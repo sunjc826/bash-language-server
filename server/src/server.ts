@@ -24,11 +24,16 @@ import {
 } from './util/path-completion'
 import { formatFlowValue, tryGetArrayElements } from './util/flow-value'
 import { getEmbeddedSemanticTokens, SEMANTIC_TOKEN_LEGEND } from './util/embedded-tokens'
-import { FigOptionSuggestion, FigSpecs } from './util/fig-options'
+import {
+  FigOption,
+  FigOptionSuggestion,
+  FigSpecs,
+  parseOptionWord,
+} from './util/fig-options'
 import { uniqueBasedOnHash } from './util/array'
 import { logger, setLogConnection, setLogLevel } from './util/logger'
 import { isPositionIncludedInRange } from './util/lsp'
-import { getShellDocumentation } from './util/sh'
+import { getBuiltinOptions, getShellDocumentation } from './util/sh'
 
 const PARAMETER_EXPANSION_PREFIXES = new Set(['$', '${'])
 const CONFIGURATION_SECTION = 'bashIde'
@@ -551,7 +556,9 @@ export default class BashServer {
     return codeActions
   }
 
-  private onCompletion(params: LSP.TextDocumentPositionParams): BashCompletionItem[] {
+  private async onCompletion(
+    params: LSP.TextDocumentPositionParams,
+  ): Promise<BashCompletionItem[]> {
     const word = this.analyzer.wordAtPointFromTextPosition({
       ...params,
       position: {
@@ -660,11 +667,17 @@ export default class BashServer {
       )
 
       if (commandWords) {
-        // Prefer the bundled Fig specs, which know subcommands and describe
-        // each option; fall back to bash-completion for other commands.
+        // Builtins are described by bash's own help text. Otherwise prefer the
+        // bundled Fig specs, which know subcommands and describe each option,
+        // and fall back to bash-completion for commands without a spec.
+        const helpOptions = await this.getHelpOptions(commandWords)
         const options: FigOptionSuggestion[] =
-          this.figSpecs.getOptions(commandWords, word) ??
-          getCommandOptions(commandWords[0], word).map((name) => ({ name }))
+          helpOptions.length > 0
+            ? helpOptions
+                .filter((option) => option.name[0].startsWith(word))
+                .map(({ name: [name], description }) => ({ name, description }))
+            : this.figSpecs.getOptions(commandWords, word) ??
+              getCommandOptions(commandWords[0], word).map((name) => ({ name }))
 
         optionsCompletions = options.map(({ name, description }) => ({
           label: name,
@@ -930,7 +943,7 @@ export default class BashServer {
 
     const optionDocumentation =
       word.startsWith('-') && !isVariable
-        ? this.getOptionDocumentation(params, word)
+        ? await this.getOptionDocumentation(params, word)
         : null
     if (optionDocumentation) {
       return { contents: { kind: 'markdown', value: optionDocumentation } }
@@ -979,24 +992,33 @@ export default class BashServer {
   }
 
   /**
-   * Describe the option word at the given position from the bundled Fig
-   * specs, one paragraph per flag for chained short flags such as `-xzf`.
+   * Describe the option word at the given position, one paragraph per flag
+   * for chained short flags such as `-xzf`. Builtins are described by bash's
+   * own `help` text, which matches the installed shell; other commands, and
+   * builtin options `help` does not list, by the bundled Fig specs.
    */
-  private getOptionDocumentation(
+  private async getOptionDocumentation(
     params: LSP.TextDocumentPositionParams,
     word: string,
-  ): string | null {
+  ): Promise<string | null> {
     const commandWords = this.analyzer.commandWordsAtPoint(
       params.textDocument.uri,
       params.position.line,
       params.position.character,
     )
-    const options = commandWords
-      ? this.figSpecs
-          .describeOption(commandWords, word)
-          ?.filter((option) => option.description)
-      : null
-    if (!options?.length) return null
+    if (!commandWords) return null
+
+    const helpOptions = parseOptionWord(
+      word,
+      await this.getHelpOptions(commandWords),
+      false,
+    ).options
+    const options = (
+      helpOptions.length > 0
+        ? helpOptions
+        : this.figSpecs.describeOption(commandWords, word) ?? []
+    ).filter((option) => option.description)
+    if (options.length === 0) return null
 
     return options
       .map(
@@ -1004,6 +1026,14 @@ export default class BashServer {
           `${name.map((n) => `\`${n}\``).join(', ')}\n\n${description}`,
       )
       .join('\n\n')
+  }
+
+  /**
+   * The options bash's `help` lists for a builtin, unless `--` already ended
+   * its options. Empty for other commands.
+   */
+  private async getHelpOptions([name, ...args]: string[]): Promise<FigOption[]> {
+    return Builtins.isBuiltin(name) && !args.includes('--') ? getBuiltinOptions(name) : []
   }
 
   /**

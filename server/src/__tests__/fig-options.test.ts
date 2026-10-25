@@ -19,6 +19,7 @@ import Analyzer from '../analyser'
 import LspServer from '../server'
 import { CompletionItemDataType } from '../types'
 import { FigCommand, FigSpecs } from '../util/fig-options'
+import * as sh from '../util/sh'
 
 vi.mock('node:child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:child_process')>()),
@@ -290,6 +291,46 @@ describe('option completion', () => {
     )
   })
 
+  it('completes builtin options from bash help before Fig', async () => {
+    vi.spyOn(sh, 'getBuiltinOptions').mockResolvedValue([
+      { name: ['-f'], description: 'treat each NAME as a shell function' },
+      { name: ['-v'], description: 'treat each NAME as a shell variable' },
+      { name: ['-n'], description: 'treat each NAME as a name reference' },
+    ])
+    const getOptions = vi.spyOn(FigSpecs.prototype, 'getOptions')
+    const spawn = vi.spyOn(childProcess, 'spawnSync')
+
+    const result = (await complete('unset -\n', 0, 7)) as any[]
+
+    expect(result.filter((item) => item.label.startsWith('-'))).toEqual([
+      expect.objectContaining({
+        label: '-f',
+        documentation: 'treat each NAME as a shell function',
+        textEdit: expect.objectContaining({ newText: 'f' }),
+      }),
+      expect.objectContaining({ label: '-v' }),
+      expect.objectContaining({ label: '-n' }),
+    ])
+    expect(getOptions).not.toHaveBeenCalled()
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('completes builtin options from Fig when help lists none', async () => {
+    vi.spyOn(sh, 'getBuiltinOptions').mockResolvedValue([])
+    const getOptions = vi
+      .spyOn(FigSpecs.prototype, 'getOptions')
+      .mockReturnValue([{ name: '-r', description: 'Read-only' }])
+
+    const result = (await complete('local -\n', 0, 7)) as any[]
+
+    expect(getOptions).toHaveBeenCalledWith(['local'], '-')
+    expect(result).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: '-r', documentation: 'Read-only' }),
+      ]),
+    )
+  })
+
   it('falls back to bash-completion when there is no Fig spec', async () => {
     vi.spyOn(FigSpecs.prototype, 'getOptions').mockReturnValue(null)
     const spawn = vi.spyOn(childProcess, 'spawnSync').mockReturnValue({
@@ -363,6 +404,44 @@ describe('option hover', () => {
       },
     })
     expect(describeOption).toHaveBeenCalledWith(['git', '-C', 'repo', 'commit'], '-am')
+  })
+
+  it('describes builtin options from bash help before Fig', async () => {
+    vi.spyOn(sh, 'getBuiltinOptions').mockResolvedValue([
+      { name: ['-f'], description: 'treat each NAME as a shell function' },
+      { name: ['-v'], description: 'treat each NAME as a shell variable' },
+      { name: ['-a'], description: 'to make NAMEs indexed arrays' },
+      { name: ['-x'], description: 'to make NAMEs export' },
+    ])
+    const describeOption = vi.spyOn(FigSpecs.prototype, 'describeOption')
+
+    expect(await hover('unset -f my_function\n', 0, 7)).toEqual({
+      contents: {
+        kind: 'markdown',
+        value: '`-f`\n\ntreat each NAME as a shell function',
+      },
+    })
+    expect(await hover('declare -ax names\n', 0, 9)).toEqual({
+      contents: {
+        kind: 'markdown',
+        value: '`-a`\n\nto make NAMEs indexed arrays\n\n`-x`\n\nto make NAMEs export',
+      },
+    })
+    expect(describeOption).not.toHaveBeenCalled()
+  })
+
+  it('uses Fig for builtin options that help does not list', async () => {
+    vi.spyOn(sh, 'getBuiltinOptions').mockResolvedValue([])
+    vi.spyOn(FigSpecs.prototype, 'describeOption').mockReturnValue([
+      { name: ['-v'], description: 'Variable definition will be unset' },
+    ])
+
+    expect(await hover('unset -v name\n', 0, 7)).toEqual({
+      contents: {
+        kind: 'markdown',
+        value: '`-v`\n\nVariable definition will be unset',
+      },
+    })
   })
 
   it('falls through when Fig has no description', async () => {

@@ -218,7 +218,7 @@ function optionLikeSubcommands(command: FigCommand): FigCommand[] {
  * value of the last one: `--file=x`, or `-ffile` when -f takes an argument.
  * Chained short flags such as `-xzf` stand for each flag in turn.
  */
-function parseOptionWord(
+export function parseOptionWord(
   word: string,
   options: FigOption[],
   posixNoncompliant: boolean,

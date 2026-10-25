@@ -561,3 +561,85 @@ describe('memorize', () => {
     expect(arg2CallResult1).toBe(arg2CallResult2)
   })
 })
+
+describe('parseHelpOptions', () => {
+  it('reads tab-separated options, their values and continuation lines', () => {
+    const help = [
+      'read: read [-ers] [-a array] [name ...]',
+      '    Read a line from the standard input.',
+      '    ',
+      '    Options:',
+      '      -a array\tassign the words read to sequential indices of the array',
+      '    \t\tvariable ARRAY, starting at zero',
+      '      -r\tdo not allow backslashes to escape any characters',
+      '    ',
+      '    Exit Status:',
+      '      -x\tnot an option, outside the Options section',
+    ].join('\n')
+
+    expect(sh.parseHelpOptions(help)).toEqual([
+      {
+        name: ['-a'],
+        description:
+          'assign the words read to sequential indices of the array variable ARRAY, starting at zero',
+        argCount: 1,
+      },
+      { name: ['-r'], description: 'do not allow backslashes to escape any characters' },
+    ])
+  })
+
+  it('reads space-separated options and every Options section', () => {
+    const help = [
+      '    Options:',
+      '      -e  Exit immediately if a command exits with a non-zero status.',
+      '      -o option-name',
+      '          Set the variable corresponding to option-name:',
+      '              errexit      same as -e',
+      '      -   Assign any remaining arguments to the positional parameters.',
+      '    ',
+      '    Options which set attributes:',
+      '      -x\tto make NAMEs export',
+    ].join('\n')
+
+    expect(sh.parseHelpOptions(help)).toEqual([
+      {
+        name: ['-e'],
+        description: 'Exit immediately if a command exits with a non-zero status.',
+      },
+      {
+        name: ['-o'],
+        description:
+          'Set the variable corresponding to option-name: errexit      same as -e',
+        argCount: 1,
+      },
+      {
+        name: ['-'],
+        description: 'Assign any remaining arguments to the positional parameters.',
+      },
+      { name: ['-x'], description: 'to make NAMEs export' },
+    ])
+  })
+
+  it('finds no options in help text without an Options section', () => {
+    // bash 3.2, as shipped with macOS, describes unset's flags in prose.
+    const help = [
+      'unset: unset [-f] [-v] [name ...]',
+      '    For each NAME, remove the corresponding variable or function.  Given',
+      "    the `-v', unset will only act on variables.",
+    ].join('\n')
+
+    expect(sh.parseHelpOptions(help)).toEqual([])
+  })
+})
+
+describe('getBuiltinOptions', () => {
+  it('does not run help for words that are not builtins', async () => {
+    const spawn = vi.spyOn(ChildProcess, 'spawn')
+    try {
+      expect(await sh.getBuiltinOptions('unset; touch /tmp/x')).toEqual([])
+      expect(spawn).not.toHaveBeenCalled()
+    } finally {
+      spawn.mockRestore()
+    }
+  })
+})

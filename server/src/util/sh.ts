@@ -1,6 +1,8 @@
 import * as ChildProcess from 'child_process'
 import { basename, isAbsolute } from 'path'
 
+import { isBuiltin } from '../builtins'
+import { FigOption } from './fig-options'
 import { logger } from './logger'
 import { isWindows } from './platform'
 
@@ -175,3 +177,68 @@ export function memorize<T extends Function>(func: T): T {
 }
 
 export const getShellDocumentation = memorize(getShellDocumentationWithoutCache)
+
+/**
+ * The options described in the "Options" sections of a builtin's `help`
+ * text, such as `-f<TAB>treat each NAME as a shell function` for unset.
+ * Bash separates a flag (and its value name) from its description with a
+ * tab or, for `set`, two spaces; deeper-indented lines continue it.
+ */
+export function parseHelpOptions(help: string): FigOption[] {
+  const options: FigOption[] = []
+  let inSection = false
+  let entryIndent: number | null = null
+
+  for (const line of help.split('\n')) {
+    if (/^\s*Options\b[^:]*:\s*$/.test(line)) {
+      inSection = true
+      entryIndent = null
+      continue
+    }
+    if (!inSection) continue
+    if (!line.trim()) {
+      inSection = false
+      continue
+    }
+
+    const leading = /^[ \t]*/.exec(line)?.[0] ?? ''
+    const entry = /^(-\S*)(?: (\S[^\t]*?))?(?:\t+| {2,}|$)(.*)$/.exec(
+      line.slice(leading.length),
+    )
+    if (
+      entry &&
+      !leading.includes('\t') &&
+      (entryIndent === null || leading.length === entryIndent)
+    ) {
+      entryIndent = leading.length
+      const [, flag, argument, description] = entry
+      options.push({
+        name: [flag],
+        description: description.trim(),
+        ...(argument && { argCount: 1 }),
+      })
+    } else if (options.length > 0) {
+      const last = options[options.length - 1]
+      last.description = [last.description, line.trim()].filter(Boolean).join(' ')
+    }
+  }
+
+  return options
+}
+
+/**
+ * The options a builtin's `help` text describes, or none when the builtin
+ * is unknown or bash cannot describe it.
+ */
+export const getBuiltinOptions: (builtin: string) => Promise<FigOption[]> = memorize(
+  async (builtin: string): Promise<FigOption[]> => {
+    // The name is interpolated into the script, so only accept known builtins.
+    if (!isBuiltin(builtin)) return []
+    try {
+      return parseHelpOptions(await execShellScript(`help ${builtin}`))
+    } catch (error) {
+      logger.error(`getBuiltinOptions failed for "${builtin}"`, error)
+      return []
+    }
+  },
+)
