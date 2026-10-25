@@ -1326,7 +1326,8 @@ export default class Analyzer {
   }
 
   /**
-   * Find a block of comments above a line position
+   * Find a block of comments above a line position, as Markdown without the
+   * leading `#` of each line.
    */
   public commentsAbove(uri: string, line: number): string | null {
     const doc = this.uriToAnalyzedDocument[uri]?.document
@@ -1367,11 +1368,10 @@ export default class Analyzer {
     }
 
     if (commentBlock.length) {
-      commentBlock.push('```txt')
       // since we searched from bottom up, we then reverse
       // the lines so that it reads top down.
       commentBlock.reverse()
-      commentBlock.push('```')
+      // Comments are Markdown: hovers render lists, emphasis and code fences.
       return commentBlock.join('\n')
     }
 

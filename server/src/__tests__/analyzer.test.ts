@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { pathToFileURL } from 'node:url'
 
+import { TextDocument } from 'vscode-languageserver-textdocument'
 import { Parser } from 'web-tree-sitter'
 
 import {
@@ -857,25 +858,21 @@ describe('commentsAbove', () => {
   it('returns a string of a comment block above a line', async () => {
     const analyzer = await getAnalyzer({})
     analyzer.analyze({ uri: CURRENT_URI, document: FIXTURE_DOCUMENT.COMMENT_DOC })
-    expect(analyzer.commentsAbove(CURRENT_URI, 22)).toEqual(
-      '```txt\ndoc for func_one\n```',
-    )
+    expect(analyzer.commentsAbove(CURRENT_URI, 22)).toEqual('doc for func_one')
   })
 
   it('handles line breaks in comments', async () => {
     const analyzer = await getAnalyzer({})
     analyzer.analyze({ uri: CURRENT_URI, document: FIXTURE_DOCUMENT.COMMENT_DOC })
     expect(analyzer.commentsAbove(CURRENT_URI, 28)).toEqual(
-      '```txt\ndoc for func_two\nhas two lines\n```',
+      'doc for func_two\nhas two lines',
     )
   })
 
   it('only returns connected comments', async () => {
     const analyzer = await getAnalyzer({})
     analyzer.analyze({ uri: CURRENT_URI, document: FIXTURE_DOCUMENT.COMMENT_DOC })
-    expect(analyzer.commentsAbove(CURRENT_URI, 36)).toEqual(
-      '```txt\ndoc for func_three\n```',
-    )
+    expect(analyzer.commentsAbove(CURRENT_URI, 36)).toEqual('doc for func_three')
   })
 
   it('returns null if no comment found', async () => {
@@ -887,16 +884,45 @@ describe('commentsAbove', () => {
   it('works for variables', async () => {
     const analyzer = await getAnalyzer({})
     analyzer.analyze({ uri: CURRENT_URI, document: FIXTURE_DOCUMENT.COMMENT_DOC })
-    expect(analyzer.commentsAbove(CURRENT_URI, 42)).toEqual(
-      '```txt\nworks for variables\n```',
-    )
+    expect(analyzer.commentsAbove(CURRENT_URI, 42)).toEqual('works for variables')
   })
 
   it('returns connected comments with empty comment line', async () => {
     const analyzer = await getAnalyzer({})
     analyzer.analyze({ uri: CURRENT_URI, document: FIXTURE_DOCUMENT.COMMENT_DOC })
     expect(analyzer.commentsAbove(CURRENT_URI, 51)).toEqual(
-      '```txt\nthis is also included\n\ndoc for func_four\n```',
+      'this is also included\n\ndoc for func_four',
+    )
+  })
+
+  it('returns Markdown as written, keeping indentation and code fences', async () => {
+    const analyzer = await getAnalyzer({})
+    const document = TextDocument.create(
+      CURRENT_URI,
+      'shellscript',
+      0,
+      [
+        '# *Params*:',
+        '# - `$1`: Path to convert, which may',
+        '#   be relative',
+        '#',
+        '# ```bash',
+        '# bu_realpath ../dir',
+        '# ```',
+        'bu_realpath() { :; }',
+      ].join('\n'),
+    )
+    analyzer.analyze({ uri: CURRENT_URI, document })
+    expect(analyzer.commentsAbove(CURRENT_URI, 7)).toEqual(
+      [
+        '*Params*:',
+        '- `$1`: Path to convert, which may',
+        '  be relative',
+        '',
+        '```bash',
+        'bu_realpath ../dir',
+        '```',
+      ].join('\n'),
     )
   })
 })

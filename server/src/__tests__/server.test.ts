@@ -819,9 +819,7 @@ describe('server', () => {
               "kind": "markdown",
               "value": "Function: **add_a_user** - *defined in issue101.sh*
 
-        \`\`\`txt
-        Helper function to add a user
-        \`\`\`",
+        Helper function to add a user",
             },
             "kind": 3,
             "label": "add_a_user",
@@ -1452,12 +1450,10 @@ describe('server', () => {
             "kind": "markdown",
             "value": "Function: **hello_world** - *defined on line 8*
 
-        \`\`\`txt
         this is a comment
         describing the function
         hello_world
-        this function takes two arguments
-        \`\`\`",
+        this function takes two arguments",
           },
         }
       `)
@@ -1475,9 +1471,7 @@ describe('server', () => {
             "kind": "markdown",
             "value": "Function: **ls** - *defined on line 6*
 
-        \`\`\`txt
-        override documentation for \`ls\` symbol
-        \`\`\`",
+        override documentation for \`ls\` symbol",
           },
         }
       `)
