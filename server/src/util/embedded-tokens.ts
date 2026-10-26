@@ -11,6 +11,8 @@
 import * as LSP from 'vscode-languageserver/node'
 import { Node as SyntaxNode } from 'web-tree-sitter'
 
+import { docTagSpans, DocTagSpan } from './doc-comments'
+
 /**
  * A lightweight language definition for token-based highlighting.
  */
@@ -1214,6 +1216,55 @@ function getBashIdeCommentTokens(rootNode: SyntaxNode): HeredocToken[] {
   return tokens
 }
 
+const DOC_TAG_TOKEN_TYPES: Record<DocTagSpan['kind'], LSP.SemanticTokenTypes> = {
+  tag: LSP.SemanticTokenTypes.decorator,
+  variable: LSP.SemanticTokenTypes.variable,
+  parameter: LSP.SemanticTokenTypes.parameter,
+  type: LSP.SemanticTokenTypes.type,
+  number: LSP.SemanticTokenTypes.number,
+}
+
+/** Whether only indentation precedes the node on its line. */
+function startsLine(node: SyntaxNode): boolean {
+  for (let current: SyntaxNode | null = node; current; current = current.parent) {
+    const previous = current.previousSibling
+    if (previous) return previous.endPosition.row < node.startPosition.row
+  }
+  return true
+}
+
+/**
+ * Highlight shdoc-style tags (`@arg $1 {path} dir ...`) in blocks of whole-line
+ * comments, as the hover reads them.
+ */
+function getDocTagTokens(rootNode: SyntaxNode): HeredocToken[] {
+  const tokens: HeredocToken[] = []
+  let block: SyntaxNode[] = []
+  const flush = () => {
+    // A block's lines may be indented differently; columns are per line.
+    const spans = docTagSpans(block.map((node) => node.text))
+    for (const span of spans) {
+      const node = block[span.line]!
+      tokens.push({
+        line: node.startPosition.row,
+        character: node.startPosition.column + span.start,
+        length: span.length,
+        tokenType: DOC_TAG_TOKEN_TYPES[span.kind],
+      })
+    }
+    block = []
+  }
+
+  for (const node of rootNode.descendantsOfType('comment')) {
+    if (!startsLine(node)) continue
+    const last = block[block.length - 1]
+    if (last && last.startPosition.row !== node.startPosition.row - 1) flush()
+    block.push(node)
+  }
+  flush()
+  return tokens
+}
+
 /**
  * Walk a bash AST and extract semantic tokens for all embedded languages
  * found in heredocs and inline string arguments.
@@ -1223,6 +1274,7 @@ export function getEmbeddedSemanticTokens(rootNode: SyntaxNode): LSP.SemanticTok
 
   // 0. bash-ide directive comments — highlight as decorators
   allTokens.push(...getBashIdeCommentTokens(rootNode))
+  allTokens.push(...getDocTagTokens(rootNode))
 
   // 1. Heredocs
   const heredocs = rootNode.descendantsOfType('heredoc_redirect')

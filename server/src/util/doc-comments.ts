@@ -19,6 +19,8 @@ const FENCE_LINE = /^\s*(```|~~~)/
 const TAG_LINE = /^@([a-z][a-z-]*)(?:\s+(.*))?$/
 const DIRECTIVE_LINE = /^\s*bash-ide\s/
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+// `@set NAME {type} text`, `@exitcode N text`, `@see target`
+const SECTION_ITEM = /^(\S+)\s*(?:\{([^}]*)\}\s*)?([\s\S]*)$/
 
 export type DocProblem = {
   /** Line of the tag, relative to the first line of the comment block. */
@@ -410,17 +412,86 @@ export function renderDocComment({
 /** `@option -v|--verbose <level>: text`, or the option alone, as a list item. */
 function optionItem(text: string): string {
   const [first, ...more] = text.split('\n')
-  const colon = first.indexOf(': ')
-  const spec = colon < 0 ? first : first.slice(0, colon)
-  const body = colon < 0 ? undefined : [first.slice(colon + 2), ...more].join('\n')
+  const spec = optionSpec(first)
+  const body =
+    spec.length === first.length
+      ? undefined
+      : [first.slice(spec.length + 2), ...more].join('\n')
   return listItem(`\`${spec}\``, body)
+}
+
+/** The option part of an `@option` line: the text before `: `, or all of it. */
+function optionSpec(line: string): string {
+  const colon = line.indexOf(': ')
+  return colon < 0 ? line : line.slice(0, colon)
 }
 
 /** `@set NAME {type} text`, `@exitcode N text` and `@see target` list items. */
 function sectionItem(tag: string, text: string): string {
-  const match = /^(\S+)\s*(?:\{([^}]*)\}\s*)?([\s\S]*)$/.exec(text)
+  const match = SECTION_ITEM.exec(text)
   if (!match) return `- ${text}`
   const [, key, type, body] = match
   if (tag === 'see') return `- \`${key}\`${body ? ` ${body}` : ''}`
   return listItem(`\`${key}\`${type ? ` *${type}*` : ''}`, body || undefined)
+}
+
+/** A part of a tag line to highlight, in columns of the raw comment line. */
+export type DocTagSpan = {
+  /** Index of the line in the comment block. */
+  line: number
+  start: number
+  length: number
+  kind: 'tag' | 'variable' | 'parameter' | 'type' | 'number'
+}
+
+/**
+ * The parts of the tag lines in a block of comment lines (each still with its
+ * `#`) to highlight: the tag, and the parameter, type, option or variable it
+ * documents where the hover reads one.
+ */
+export function docTagSpans(lines: readonly string[]): DocTagSpan[] {
+  const offsets: number[] = []
+  const contents = lines.map((line) => {
+    const text = COMMENT_LINE.exec(line)?.[1] ?? ''
+    offsets.push(line.length - text.length)
+    return text.trimEnd()
+  })
+
+  const spans: DocTagSpan[] = []
+  for (const [line, [, tag, text = '']] of tagLines(contents)) {
+    const textStart = offsets[line] + contents[line].length - text.length
+    const add = (start: number, value: string | undefined, kind: DocTagSpan['kind']) => {
+      if (value && start >= 0) {
+        spans.push({ line, start: textStart + start, length: value.length, kind })
+      }
+    }
+    spans.push({ line, start: offsets[line], length: tag.length + 1, kind: 'tag' })
+
+    if (tag === 'arg') {
+      const param = parseArg(text, line, [])
+      if (!param) continue
+      const slot = text.slice(0, text.search(/\s|$/))
+      add(0, slot, 'variable')
+      let end = slot.length
+      for (const [value, kind] of [
+        [param.type, 'type'],
+        [param.name, 'parameter'],
+      ] as const) {
+        if (!value) continue
+        const start = text.indexOf(value, end)
+        if (start < 0) break
+        add(start, value, kind)
+        end = start + value.length
+      }
+    } else if (tag === 'option') {
+      add(0, optionSpec(text), 'parameter')
+    } else if (tag === 'set' || tag === 'exitcode') {
+      const match = SECTION_ITEM.exec(text)
+      if (!match) continue
+      const [, key, type] = match
+      add(0, key, tag === 'set' ? 'variable' : 'number')
+      if (type?.trim()) add(text.indexOf(type.trim(), key.length), type.trim(), 'type')
+    }
+  }
+  return spans
 }
