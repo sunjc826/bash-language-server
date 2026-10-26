@@ -1,0 +1,28 @@
+{
+  "information_for_contributors": [
+    "Injected into the shell grammar (source.shell) VS Code ships. A comment",
+    "right after a case pattern's ) must start the item's body: the built-in",
+    "grammar does not start a comment at `)#`, and after `) # ...` it reads",
+    "the body as another pattern."
+  ],
+  "scopeName": "source.shell.case-comments",
+  "injectionSelector": "L:meta.case.shell - meta.case.entry",
+  "patterns": [
+    {
+      "begin": "(?<=\\))[ \\t]*+((#).*)",
+      "beginCaptures": {
+        "1": { "name": "comment.line.number-sign.shell" },
+        "2": { "name": "punctuation.definition.comment.shell" }
+      },
+      "end": "(?:(;;)|(?=\\besac\\b))",
+      "endCaptures": {
+        "1": { "name": "punctuation.terminator.statement.case.shell" }
+      },
+      "name": "meta.case.entry.body.shell",
+      "patterns": [
+        { "include": "source.shell#typical_statements" },
+        { "include": "source.shell#initial_context" }
+      ]
+    }
+  ]
+}

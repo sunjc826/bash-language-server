@@ -28,6 +28,15 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "grammars": [
+      {
+        "scopeName": "source.shell.case-comments",
+        "path": "./syntaxes/case-comments.tmLanguage.json",
+        "injectTo": [
+          "source.shell"
+        ]
+      }
+    ],
     "configuration": {
       "type": "object",
       "title": "Bash IDE configuration",
